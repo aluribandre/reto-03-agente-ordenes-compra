@@ -1,16 +1,18 @@
 // Ciclo del agente (PRD 6.3): mensaje → modelo → tools (vía runner) → modelo … → texto final.
 // - CA1: tope de iteraciones por turno.  - Presupuesto de tokens por sesión.
+// - CA3: la confirmación humana la resuelve el runtime ANTES de llamar al modelo (autorizacion.ts).
 // - CA4: cada llamada pasa por el runner (log.jsonl) y queda en los eventos de la sesión.
 // - CA5: un error de tool o del proveedor no mata la sesión.
 // - El historial es append-only y siempre válido: todo tool_use recibe su tool_result.
-// F8 no implementa la autorización conversacional (F9): las tools reciben ctx sin `autorizacion`.
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { z } from "zod"
 import type { Reloj } from "../config"
 import { ErrorLlm, totalTokens, type DefinicionTool, type LlamadaTool, type LlmAdapter, type ResultadoLlamada } from "../llm/adapter"
 import { appendLog } from "../persistencia"
+import type { Regla } from "../schemas"
 import { ejecutarTool, type ContextoTool, type Herramienta } from "../tools/runner"
+import { efectoSobreAutorizacion, notaConfirmacion, pendienteDesdeTool, resolverEntrada, type EntradaTurno, type MotivoInvalida } from "./autorizacion"
 import type { EventoTool, Sesion } from "./sesiones"
 
 export type OpcionesAgente = {
@@ -32,6 +34,10 @@ export type EstadoTurno =
   | "rechazo"
   | "respuesta_truncada"
   | "error_interno"
+  | "confirmacion_cancelada"
+  | "confirmacion_invalida"
+
+export type ConfirmacionPendiente = { caso: string; payload_sha: string; reglas: Regla[] }
 
 export type ResultadoTurno = {
   respuesta: string
@@ -39,8 +45,10 @@ export type ResultadoTurno = {
   eventos: EventoTool[]
   iteraciones: number
   tokensTurno: number
-  // Reservado para F9 (autorización conversacional). En F8 siempre es false.
+  // Derivado del estado del runtime (nunca del texto del modelo).
   needsConfirmation: boolean
+  pendingConfirmation: ConfirmacionPendiente | null
+  autorizacion: { id: string; origen: "boton" | "mensaje"; consumida: boolean } | null
 }
 
 const MAX_NOMBRE = 64
@@ -75,6 +83,14 @@ function errorJson(codigo: string, mensaje: string, sugerencia: string): string 
   return JSON.stringify({ ok: false, error: { codigo, mensaje, sugerencia } })
 }
 
+const MENSAJES_INVALIDA: Record<MotivoInvalida, string> = {
+  sin_pendiente: "No hay ninguna confirmación pendiente en esta sesión: no se creó ninguna OC.",
+  turno_vencido: "La confirmación llegó tarde: solo vale en el turno siguiente a la pregunta. No se creó ninguna OC; vuelve a procesar el caso.",
+  caso_distinto: "La confirmación no corresponde al caso pendiente. No se creó ninguna OC y el pendiente quedó cancelado.",
+  payload_distinto: "La confirmación no corresponde al payload pendiente. No se creó ninguna OC y el pendiente quedó cancelado.",
+  boton_malformado: "La confirmación recibida no es válida. No se creó ninguna OC.",
+}
+
 async function ejecutarLlamada(
   llamada: LlamadaTool,
   sesion: Sesion,
@@ -101,7 +117,10 @@ async function ejecutarLlamada(
       console.warn("[agente] no se pudo registrar una llamada a herramienta desconocida")
     }
   } else {
+    // La autorización solo existe si el runtime la otorgó en ESTE turno y no se consumió.
+    const vigente = sesion.autorizacion !== null && !sesion.autorizacion.consumida ? sesion.autorizacion : null
     const ctx: ContextoTool = { directory: op.directorio, sessionId: sesion.id, turnoId, reloj: op.reloj }
+    if (vigente !== null) ctx.autorizacion = vigente
     salida = await ejecutarTool(nombre, herramienta, llamada.argumentos, ctx, op.cronometro === undefined ? {} : { cronometro: op.cronometro })
   }
 
@@ -122,12 +141,39 @@ async function ejecutarLlamada(
   return { resultado: { id: llamada.id, contenido: salida, esError: !ok }, evento }
 }
 
-export async function ejecutarTurno(sesion: Sesion, textoUsuario: string, op: OpcionesAgente): Promise<ResultadoTurno> {
+// Efectos del resultado de una tool sobre el estado de autorización de la sesión.
+function actualizarAutorizacion(sesion: Sesion, llamada: LlamadaTool, contenido: string, turnoId: string, turnoNumero: number, ahora: string): void {
+  if (sesion.autorizacion !== null && !sesion.autorizacion.consumida) {
+    const efecto = efectoSobreAutorizacion(sesion.autorizacion, llamada.nombre, llamada.argumentos, contenido)
+    if (efecto === "consumir") sesion.autorizacion = { ...sesion.autorizacion, consumida: true }
+  }
+  // Un solo pendiente por sesión: dentro del turno se conserva el primero (salvo el mismo caso).
+  const nuevo = pendienteDesdeTool(llamada.nombre, llamada.argumentos, contenido, {
+    session_id: sesion.id,
+    creado_en: ahora,
+    turno_origen: turnoId,
+    turno_numero: turnoNumero,
+  })
+  if (nuevo !== null && (sesion.pendiente === null || sesion.pendiente.caso === nuevo.caso)) sesion.pendiente = nuevo
+}
+
+function textoDeEntrada(entrada: EntradaTurno): string {
+  // El texto del usuario nunca puede hacerse pasar por una nota del runtime.
+  if (typeof entrada === "string") return entrada.replaceAll("[Runtime]", "[runtime-citado]")
+  return `[Botón] Confirmar OC ${String(entrada.caso)} (payload ${String(entrada.payload_sha).slice(0, 12)}…)`
+}
+
+export async function ejecutarTurno(sesion: Sesion, entrada: EntradaTurno, op: OpcionesAgente): Promise<ResultadoTurno> {
   sesion.turnos += 1
-  const turnoId = `${sesion.id}:t${sesion.turnos}`
+  const turnoNumero = sesion.turnos
+  const turnoId = `${sesion.id}:t${turnoNumero}`
   sesion.turnoId = turnoId
   sesion.ultimoError = null
-  sesion.mensajes.push({ rol: "usuario", texto: textoUsuario })
+
+  // CA3: el pendiente del turno anterior solo puede confirmarse en ESTE mensaje; nada se arrastra.
+  const pendienteAnterior = sesion.pendiente
+  sesion.pendiente = null
+  sesion.autorizacion = null
 
   const eventos: EventoTool[] = []
   let iteraciones = 0
@@ -136,8 +182,51 @@ export async function ejecutarTurno(sesion: Sesion, textoUsuario: string, op: Op
 
   const fin = (estado: EstadoTurno, respuesta: string, tipoError?: string): ResultadoTurno => {
     if (tipoError !== undefined) sesion.ultimoError = { turno_id: turnoId, tipo: tipoError, mensaje: respuesta }
-    return { respuesta, estado, eventos, iteraciones, tokensTurno, needsConfirmation: false }
+    const p = sesion.pendiente
+    const a = sesion.autorizacion
+    return {
+      respuesta,
+      estado,
+      eventos,
+      iteraciones,
+      tokensTurno,
+      needsConfirmation: p !== null,
+      pendingConfirmation: p === null ? null : { caso: p.caso, payload_sha: p.payload_sha, reglas: [...p.confirmaciones] },
+      autorizacion: a === null ? null : { id: a.id, origen: a.origen, consumida: a.consumida },
+    }
   }
+
+  const respuestaDirecta = (estado: EstadoTurno, texto: string): ResultadoTurno => {
+    sesion.mensajes.push({ rol: "usuario", texto: textoDeEntrada(entrada) })
+    sesion.mensajes.push({ rol: "asistente", texto, llamadas: [] })
+    return fin(estado, texto)
+  }
+
+  const decision = resolverEntrada(pendienteAnterior, entrada, {
+    sessionId: sesion.id,
+    turnoId,
+    turnoNumero,
+    actor: sesion.actor,
+    ahora: op.reloj(),
+  })
+
+  let textoUsuario = textoDeEntrada(entrada)
+  switch (decision.tipo) {
+    case "invalida":
+      return respuestaDirecta("confirmacion_invalida", MENSAJES_INVALIDA[decision.motivo])
+    case "cancelar":
+      return respuestaDirecta(
+        "confirmacion_cancelada",
+        `Entendido: no se creó la OC de ${decision.pendiente.caso}. La confirmación pendiente quedó cancelada; si quieres retomarla, vuelve a procesar el caso.`,
+      )
+    case "autorizar":
+      sesion.autorizacion = decision.autorizacion
+      textoUsuario = `${textoUsuario}\n\n${notaConfirmacion(decision.autorizacion, decision.pendiente.confirmaciones)}`
+      break
+    case "continuar":
+      break
+  }
+  sesion.mensajes.push({ rol: "usuario", texto: textoUsuario })
 
   try {
     const definiciones = definicionesTools(op.herramientas)
@@ -183,6 +272,7 @@ export async function ejecutarTurno(sesion: Sesion, textoUsuario: string, op: Op
         const resultados: ResultadoLlamada[] = []
         for (const llamada of respuesta.llamadas) {
           const { resultado, evento } = await ejecutarLlamada(llamada, sesion, turnoId, op)
+          actualizarAutorizacion(sesion, llamada, resultado.contenido, turnoId, turnoNumero, op.reloj())
           resultados.push(resultado)
           eventos.push(evento)
           sesion.eventos.push(evento)

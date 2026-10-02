@@ -8,9 +8,11 @@ import { crearSesion, type Sesion } from "../src/agent/sesiones"
 import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, crearReloj } from "../src/config"
 import { ErrorLlm, type DefinicionTool, type LlamadaTool, type LlmAdapter, type Mensaje, type RespuestaLlm, type ResultadoLlamada } from "../src/llm/adapter"
 import { AnthropicAdapter, traducirError } from "../src/llm/anthropic"
-import { leerControl, leerJsonl } from "../src/persistencia"
-import { LineaLog, OrdenRegistrada } from "../src/schemas"
-import { registroOc } from "../src/tools/oc"
+import { clasificarMensaje, efectoSobreAutorizacion, resolverEntrada, type PendienteConfirmacion } from "../src/agent/autorizacion"
+import { leerControl, leerEjecucion, leerJsonl } from "../src/persistencia"
+import { MockSapAdapter } from "../src/sap/mock"
+import { LineaLog, OrdenRegistrada, type Autorizacion } from "../src/schemas"
+import { crearHerramientasOc, registroOc } from "../src/tools/oc"
 import { CASOS_REALES, FIXTURES_REALES, crearRaizTemporal, huellaArbol, type RaizTemporal } from "./helpers"
 
 // ---------------------------------------------------------------------------
@@ -276,7 +278,9 @@ describe("guardrails, confirmación e historial", () => {
     expect(r.eventos.at(-1)).toMatchObject({ herramienta: "oc_crear", ok: false, codigo_error: "CONFIRMACION_REQUERIDA" })
     expect(ultimosResultados(llm.recibidos[5]?.mensajes ?? [])[0]?.contenido).toContain("CONFIRMACION_REQUERIDA")
     expect(r.respuesta.trim().endsWith("?")).toBe(true)
-    expect(r.needsConfirmation).toBe(false) // el enforcement runtime llega en F9
+    // F9: el estado pendiente lo registra el runtime (no el texto del modelo).
+    expect(r.needsConfirmation).toBe(true)
+    expect(r.pendingConfirmation).toMatchObject({ caso: "sol-004", reglas: ["RC5"] })
     expect(await leerJsonl(raiz, "sap/ordenes.jsonl", OrdenRegistrada)).toEqual([])
     expect((await leerControl(raiz)).map((f) => f.resultado)).toEqual(["pendiente"])
   })
@@ -313,6 +317,319 @@ describe("herramientas expuestas y adaptador", () => {
   })
 
   test("fixtures/ intacto y out/ real sin modificar", async () => {
+    expect(await huellaArbol(FIXTURES_REALES)).toBe(huellaInicialFixtures)
+    expect(existsSync(DIR_OUT_REAL)).toBe(outRealExistia)
+  })
+})
+
+// ===========================================================================
+// F9: runtime de autorización humana
+// ===========================================================================
+
+function shaDeNota(mensajes: readonly Mensaje[]): string {
+  const usuario = [...mensajes].reverse().find((m) => m.rol === "usuario")
+  const sha = usuario?.rol === "usuario" ? /payload_sha=([a-f0-9]{64})/.exec(usuario.texto)?.[1] : undefined
+  if (sha === undefined) throw new Error("el turno no trae la nota del runtime")
+  return sha
+}
+
+// Turno N: proceso completo hasta CONFIRMACION_REQUERIDA (el modelo intenta crear en el mismo turno).
+const pasosPendiente = (caso: string, cierre = "¿Confirmas crear la OC?"): Paso[] => [
+  pideTools(llamada("oc_leer_paquete", { caso })),
+  pideTools(llamada("oc_validar", { caso })),
+  pideTools(llamada("oc_generar_evidencia", { caso })),
+  pideTools(llamada("oc_construir_payload", { caso })),
+  (m) => pideTools(llamada("oc_crear", { caso, payload_sha: dato(ultimosResultados(m)[0], "payload_sha") })),
+  responde(cierre),
+]
+
+// Turno N+1: el modelo crea con el caso y payload_sha de la nota del runtime.
+const pasosCrearConfirmado = (caso: string): Paso[] => [
+  (m) => pideTools(llamada("oc_crear", { caso, payload_sha: shaDeNota(m) })),
+  (m) => responde(`OC ${dato(ultimosResultados(m)[0], "numero_oc")} creada.`),
+]
+
+const ordenesDe = (raiz: string) => leerJsonl(raiz, "sap/ordenes.jsonl", OrdenRegistrada)
+
+describe("F9 · confirmación por mensaje", () => {
+  test("A/K/O. sol-004: pendiente RC5 (sin OC en el mismo turno) → 'confirmo' → OC por 25.000.000; autorización consumida", async () => {
+    const { llm, sesion, op, raiz } = await entorno([...pasosPendiente("sol-004"), ...pasosCrearConfirmado("sol-004")])
+    const t1 = await ejecutarTurno(sesion, "procesa sol-004", op)
+    expect(t1.eventos.at(-1)).toMatchObject({ herramienta: "oc_crear", codigo_error: "CONFIRMACION_REQUERIDA" })
+    expect(t1).toMatchObject({ needsConfirmation: true, pendingConfirmation: { caso: "sol-004", reglas: ["RC5"] }, autorizacion: null })
+    expect(await ordenesDe(raiz)).toEqual([])
+
+    const t2 = await ejecutarTurno(sesion, "Sí, confirmo.", op)
+    expect(t2).toMatchObject({
+      estado: "completado",
+      respuesta: "OC 4500000001 creada.",
+      needsConfirmation: false,
+      pendingConfirmation: null,
+      autorizacion: { id: "aut-s-test-t2", origen: "mensaje", consumida: true },
+    })
+    // El runtime decidió antes de llamar al modelo y le pasó la nota con el payload exacto.
+    const primerMensajeT2 = llm.recibidos[6]?.mensajes.at(-1)
+    expect(primerMensajeT2?.rol === "usuario" && primerMensajeT2.texto.includes("[Runtime] Confirmación registrada")).toBe(true)
+    expect(shaDeNota(llm.recibidos[6]?.mensajes ?? [])).toBe(t1.pendingConfirmation?.payload_sha ?? "")
+
+    const [orden] = await ordenesDe(raiz)
+    const pos = orden?.orden.posiciones[0]
+    expect((pos?.cantidad ?? 0) * (pos?.precio_unitario ?? 0)).toBe(25_000_000)
+    expect((await leerEjecucion(raiz, "sol-004"))?.autorizacion).toMatchObject({
+      origen: "mensaje",
+      actor: "analista@sesion:s-test",
+      turno_id: "s-test:t2",
+      session_id: "s-test",
+      caso: "sol-004",
+      consumida: false, // copia otorgada a oc_crear; el consumo lo marca el runtime tras el éxito
+    })
+    expect(sesion.pendiente).toBeNull()
+    expect(sesion.autorizacion?.consumida).toBe(true)
+    expect((await leerControl(raiz)).map((f) => f.resultado)).toEqual(["pendiente", "exitoso"])
+  })
+
+  test("B. sol-005: pendiente RC8 → 'confirmo' → OC retroactiva", async () => {
+    const { sesion, op, raiz } = await entorno([...pasosPendiente("sol-005"), ...pasosCrearConfirmado("sol-005")])
+    const t1 = await ejecutarTurno(sesion, "procesa sol-005", op)
+    expect(t1.pendingConfirmation).toMatchObject({ caso: "sol-005", reglas: ["RC8"] })
+    const t2 = await ejecutarTurno(sesion, "confirmo", op)
+    expect(t2.autorizacion).toMatchObject({ origen: "mensaje", consumida: true })
+    expect((await ordenesDe(raiz)).map((o) => o.orden.referencia.solicitud_id)).toEqual(["SOL-2026-005"])
+    expect((await leerControl(raiz)).map((f) => [f.resultado, f.retroactiva])).toEqual([
+      ["pendiente", true],
+      ["exitoso", true],
+    ])
+  })
+
+  test("C. sol-006: pendiente RC6 → 'adelante' → OC con IVA y pago derivados", async () => {
+    const { sesion, op, raiz } = await entorno([...pasosPendiente("sol-006"), ...pasosCrearConfirmado("sol-006")])
+    const t1 = await ejecutarTurno(sesion, "procesa sol-006", op)
+    expect(t1.pendingConfirmation).toMatchObject({ caso: "sol-006", reglas: ["RC6"] })
+    await ejecutarTurno(sesion, "Adelante", op)
+    const [orden] = await ordenesDe(raiz)
+    expect(orden?.orden.condiciones_pago).toBe("Z030")
+    expect(orden?.orden.posiciones[0]?.indicador_iva).toBe("C1")
+  })
+
+  test("D. 'no confirmo': sin autorización, sin OC, pendiente cancelado y sin llamar al modelo", async () => {
+    const { llm, sesion, op, raiz } = await entorno([...pasosPendiente("sol-004")])
+    await ejecutarTurno(sesion, "procesa sol-004", op)
+    const llamadasAntes = llm.recibidos.length
+    const t2 = await ejecutarTurno(sesion, "No confirmo", op)
+    expect(t2).toMatchObject({ estado: "confirmacion_cancelada", needsConfirmation: false, autorizacion: null })
+    expect(t2.respuesta).toContain("no se creó la OC de sol-004")
+    expect(llm.recibidos).toHaveLength(llamadasAntes)
+    expect(sesion.pendiente).toBeNull()
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("E/F. 'espera' cancela el pendiente; un 'confirmo' dos turnos después no autoriza nada", async () => {
+    const { sesion, op, raiz } = await entorno([
+      ...pasosPendiente("sol-004"),
+      responde("De acuerdo, espero."),
+      // Turno N+2: el modelo intenta crear con el payload de N; no hay autorización en el runtime.
+      (m) => {
+        const sha = [...m].reverse().flatMap((x) => (x.rol === "resultados" ? x.resultados : [])).map((r) => /"payload_sha":"([a-f0-9]{64})"/.exec(r.contenido)?.[1]).find((s) => s !== undefined)
+        return pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: sha ?? "" }))
+      },
+      responde("No se creó: falta la confirmación."),
+    ])
+    await ejecutarTurno(sesion, "procesa sol-004", op)
+    const t2 = await ejecutarTurno(sesion, "espera", op)
+    expect(t2).toMatchObject({ estado: "completado", needsConfirmation: false, autorizacion: null })
+    expect(sesion.pendiente).toBeNull()
+
+    const t3 = await ejecutarTurno(sesion, "confirmo", op)
+    expect(t3.autorizacion).toBeNull()
+    expect(t3.eventos.at(-1)).toMatchObject({ herramienta: "oc_crear", codigo_error: "CONFIRMACION_REQUERIDA" })
+    expect(t3.needsConfirmation).toBe(true) // el intento fallido vuelve a dejar una pregunta pendiente
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("Q. un error de tool en el turno de confirmación no rompe la sesión ni consume la autorización", async () => {
+    const { sesion, op, raiz } = await entorno([
+      ...pasosPendiente("sol-004"),
+      pideTools(llamada("oc_crear", { caso: "sol-999" })),
+      (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+      responde("Creada."),
+      responde("¿Algo más?"),
+    ])
+    await ejecutarTurno(sesion, "procesa sol-004", op)
+    const t2 = await ejecutarTurno(sesion, "procede", op)
+    expect(t2.eventos.map((e) => [e.herramienta, e.codigo_error])).toEqual([
+      ["oc_crear", "CASO_INEXISTENTE"],
+      ["oc_crear", null],
+    ])
+    expect(t2.autorizacion?.consumida).toBe(true)
+    expect(await ordenesDe(raiz)).toHaveLength(1)
+    expect((await ejecutarTurno(sesion, "gracias", op)).estado).toBe("completado")
+  })
+
+  test("Fallo parcial: SAP_ERROR conserva la autorización dentro del turno; el reintento idempotente la consume", async () => {
+    let fallas = 1
+    const herramientas = registroOc(
+      crearHerramientasOc({
+        crearSap: (ctx, maestros) => {
+          const real = new MockSapAdapter({ raiz: ctx.directory, reloj: ctx.reloj, proveedores: maestros.proveedores })
+          return {
+            consultarProveedor: (nit) => real.consultarProveedor(nit),
+            buscarOrdenPorReferencia: (id) => real.buscarOrdenPorReferencia(id),
+            crearOrden: async (orden) => {
+              if (fallas-- > 0) throw new Error("timeout simulado")
+              return real.crearOrden(orden)
+            },
+          }
+        },
+      }),
+    )
+    const { sesion, op, raiz } = await entorno(
+      [
+        ...pasosPendiente("sol-004"),
+        (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+        (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+        responde("Creada tras reintento."),
+      ],
+      { herramientas },
+    )
+    await ejecutarTurno(sesion, "procesa sol-004", op)
+    const t2 = await ejecutarTurno(sesion, "confirmo", op)
+    expect(t2.eventos.map((e) => e.codigo_error)).toEqual(["SAP_ERROR", null])
+    expect(t2.autorizacion).toMatchObject({ consumida: true })
+    expect(await ordenesDe(raiz)).toHaveLength(1)
+  })
+})
+
+describe("F9 · confirmación por botón y validaciones", () => {
+  async function conPendiente(caso = "sol-004", extra: Paso[] = []) {
+    const e = await entorno([...pasosPendiente(caso), ...extra])
+    const t1 = await ejecutarTurno(e.sesion, `procesa ${caso}`, e.op)
+    return { ...e, sha: t1.pendingConfirmation?.payload_sha ?? "" }
+  }
+
+  test("L. botón válido → autorización origen=boton → OC", async () => {
+    const { sesion, op, raiz, sha } = await conPendiente("sol-004", pasosCrearConfirmado("sol-004"))
+    const t2 = await ejecutarTurno(sesion, { action: "confirm", caso: "sol-004", payload_sha: sha }, op)
+    expect(t2).toMatchObject({ estado: "completado", autorizacion: { origen: "boton", consumida: true } })
+    expect((await leerEjecucion(raiz, "sol-004"))?.autorizacion?.origen).toBe("boton")
+  })
+
+  test("G. botón para otro caso → rechazado, sin OC, sin llamar al modelo", async () => {
+    const { llm, sesion, op, raiz, sha } = await conPendiente()
+    const antes = llm.recibidos.length
+    const t2 = await ejecutarTurno(sesion, { action: "confirm", caso: "sol-005", payload_sha: sha }, op)
+    expect(t2).toMatchObject({ estado: "confirmacion_invalida", autorizacion: null, needsConfirmation: false })
+    expect(t2.respuesta).toContain("no corresponde al caso")
+    expect(llm.recibidos).toHaveLength(antes)
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("H. botón con otro payload_sha → rechazado", async () => {
+    const { sesion, op, raiz } = await conPendiente()
+    const t2 = await ejecutarTurno(sesion, { action: "confirm", caso: "sol-004", payload_sha: "c".repeat(64) }, op)
+    expect(t2.estado).toBe("confirmacion_invalida")
+    expect(t2.respuesta).toContain("no corresponde al payload")
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("I. confirmación desde otra sesión → inválida", async () => {
+    const { op, raiz, sha } = await conPendiente()
+    const otra = crearSesion("s-otra")
+    const t = await ejecutarTurno(otra, { action: "confirm", caso: "sol-004", payload_sha: sha }, op)
+    expect(t.estado).toBe("confirmacion_invalida")
+    expect(t.respuesta).toContain("No hay ninguna confirmación pendiente")
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("J. una autorización consumida no se reutiliza (el mismo botón tras crear la OC)", async () => {
+    const { sesion, op, raiz, sha } = await conPendiente("sol-004", pasosCrearConfirmado("sol-004"))
+    await ejecutarTurno(sesion, { action: "confirm", caso: "sol-004", payload_sha: sha }, op)
+    const t3 = await ejecutarTurno(sesion, { action: "confirm", caso: "sol-004", payload_sha: sha }, op)
+    expect(t3.estado).toBe("confirmacion_invalida")
+    expect(sesion.autorizacion).toBeNull()
+    expect(await ordenesDe(raiz)).toHaveLength(1)
+  })
+
+  test("M. botón sin pendiente o malformado → rechazado", async () => {
+    const { sesion, op } = await entorno([])
+    const t1 = await ejecutarTurno(sesion, { action: "confirm", caso: "sol-004", payload_sha: "a".repeat(64) }, op)
+    expect(t1.respuesta).toContain("No hay ninguna confirmación pendiente")
+    const t2 = await ejecutarTurno(sesion, { action: "confirm", caso: "../x", payload_sha: "no-es-sha" }, op)
+    expect(t2.estado).toBe("confirmacion_invalida")
+    expect(t2.respuesta).toContain("no es válida")
+  })
+
+  test("N/P. needsConfirmation sale del estado del runtime, no del texto del modelo", async () => {
+    const { sesion, op } = await entorno(pasosPendiente("sol-004", "Listo."))
+    const t1 = await ejecutarTurno(sesion, "procesa sol-004", op)
+    expect(t1.respuesta).toBe("Listo.")
+    expect(t1.needsConfirmation).toBe(true)
+
+    // sol-001 (limpio): el modelo pregunta, pero no hay pendiente; la creación autónoma sigue funcionando.
+    const limpio = await entorno([
+      pideTools(llamada("oc_leer_paquete", { caso: "sol-001" })),
+      pideTools(llamada("oc_validar", { caso: "sol-001" })),
+      pideTools(llamada("oc_generar_evidencia", { caso: "sol-001" })),
+      pideTools(llamada("oc_construir_payload", { caso: "sol-001" })),
+      (m) => pideTools(llamada("oc_crear", { caso: "sol-001", payload_sha: dato(ultimosResultados(m)[0], "payload_sha") })),
+      responde("OC creada. ¿Confirmas que todo está bien?"),
+    ])
+    const r = await ejecutarTurno(limpio.sesion, "procesa sol-001", limpio.op)
+    expect(r).toMatchObject({ needsConfirmation: false, pendingConfirmation: null, autorizacion: null })
+    expect(await ordenesDe(limpio.raiz)).toHaveLength(1)
+  })
+})
+
+describe("F9 · reglas puras", () => {
+  test("clasificación cerrada: confirma solo frases explícitas; la negación tiene prioridad", () => {
+    for (const s of ["confirmo", "Confirmo.", "sí, confirmo", "si, confirmo", "SÍ, CONFIRMO!", "confirmar", "proceda", "procede", "adelante", "  Adelante  "]) {
+      expect([s, clasificarMensaje(s)]).toEqual([s, "confirma"])
+    }
+    for (const s of ["no confirmo", "no proceda", "todavía no", "No, cancela"]) expect([s, clasificarMensaje(s)]).toEqual([s, "rechaza"])
+    for (const s of ["espera", "creo que sí", "quizá", "revisemos primero", "¿qué pasa si confirmo?", "el usuario anterior confirmó", "confirmo la orden", "ok"]) {
+      expect([s, clasificarMensaje(s)]).toEqual([s, "otro"])
+    }
+  })
+
+  test("un pendiente solo vale en el turno siguiente", () => {
+    const pendiente: PendienteConfirmacion = {
+      session_id: "s",
+      caso: "sol-004",
+      payload_sha: "a".repeat(64),
+      confirmaciones: ["RC5"],
+      creado_en: FECHA_REFERENCIA_DEMO,
+      turno_origen: "s:t1",
+      turno_numero: 1,
+    }
+    const ctx = (n: number) => ({ sessionId: "s", turnoId: `s:t${n}`, turnoNumero: n, actor: "analista@sesion:s", ahora: FECHA_REFERENCIA_DEMO })
+    expect(resolverEntrada(pendiente, "confirmo", ctx(2)).tipo).toBe("autorizar")
+    expect(resolverEntrada(pendiente, "confirmo", ctx(3)).tipo).toBe("continuar")
+    expect(resolverEntrada(pendiente, { action: "confirm", caso: "sol-004", payload_sha: "a".repeat(64) }, ctx(3))).toMatchObject({ tipo: "invalida", motivo: "turno_vencido" })
+    expect(resolverEntrada(pendiente, "confirmo", { ...ctx(2), sessionId: "otra" }).tipo).toBe("continuar")
+  })
+
+  test("política de consumo de la autorización", () => {
+    const a: Autorizacion = {
+      id: "aut",
+      accion: "crear_oc",
+      caso: "sol-004",
+      payload_sha: "a".repeat(64),
+      session_id: "s",
+      turno_id: "s:t2",
+      actor: "analista@sesion:s",
+      origen: "mensaje",
+      otorgada_en: FECHA_REFERENCIA_DEMO,
+      consumida: false,
+    }
+    const error = (codigo: string) => JSON.stringify({ ok: false, error: { codigo, mensaje: "x" } })
+    expect(efectoSobreAutorizacion(a, "oc_crear", { caso: "sol-004" }, JSON.stringify({ ok: true, data: {} }))).toBe("consumir")
+    expect(efectoSobreAutorizacion(a, "oc_crear", { caso: "sol-004" }, error("SAP_ERROR"))).toBe("conservar")
+    expect(efectoSobreAutorizacion(a, "oc_crear", { caso: "sol-004" }, error("ERROR_ESCRITURA"))).toBe("conservar")
+    expect(efectoSobreAutorizacion(a, "oc_crear", { caso: "sol-004" }, error("PAYLOAD_NO_COINCIDE"))).toBe("consumir")
+    expect(efectoSobreAutorizacion(a, "oc_crear", { caso: "sol-001" }, JSON.stringify({ ok: true, data: {} }))).toBe("sin_efecto")
+    expect(efectoSobreAutorizacion(a, "oc_validar", { caso: "sol-004" }, JSON.stringify({ ok: true, data: {} }))).toBe("sin_efecto")
+  })
+
+  test("fixtures/ intacto tras F9", async () => {
     expect(await huellaArbol(FIXTURES_REALES)).toBe(huellaInicialFixtures)
     expect(existsSync(DIR_OUT_REAL)).toBe(outRealExistia)
   })

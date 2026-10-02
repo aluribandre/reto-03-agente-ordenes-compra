@@ -1,5 +1,7 @@
 // Sesiones en memoria (no se persisten a disco). Solo lo necesario para continuar el contexto.
 import type { Mensaje, Uso } from "../llm/adapter"
+import type { Autorizacion } from "../schemas"
+import { actorDeSesion, type PendienteConfirmacion } from "./autorizacion"
 
 // Llamada a tool visible en el chat (CA4): nombre, argumentos y resultado resumido.
 export type EventoTool = {
@@ -24,11 +26,20 @@ export type Sesion = {
   turnos: number
   turnoId: string | null
   ultimoError: ErrorSesion | null
+  // Identidad de sesión (no autenticada).
+  actor: string
+  // Como máximo un pendiente; solo vale para el turno siguiente.
+  pendiente: PendienteConfirmacion | null
+  // Autorización del turno en curso (un solo uso); se descarta al empezar el turno siguiente.
+  autorizacion: Autorizacion | null
 }
 
 export function crearSesion(id: string): Sesion {
   return {
     id,
+    actor: actorDeSesion(id),
+    pendiente: null,
+    autorizacion: null,
     mensajes: [],
     eventos: [],
     tokens: { entrada: 0, salida: 0, cacheEscritura: 0, cacheLectura: 0, total: 0 },
