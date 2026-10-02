@@ -9,10 +9,11 @@ import { cargarSistema } from "../src/agent/loop"
 import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, crearReloj } from "../src/config"
 import type { DefinicionTool, LlmAdapter, Mensaje, RespuestaLlm } from "../src/llm/adapter"
 import { leerControl, leerEjecucion, leerJsonl } from "../src/persistencia"
-import { LineaLog, OrdenRegistrada, PayloadSellado } from "../src/schemas"
+import { payloadSha } from "../src/domain/sello"
+import { LineaLog, OrdenCompra, OrdenRegistrada, PayloadSellado } from "../src/schemas"
 import { crearApp } from "../src/server"
 import { registroOc } from "../src/tools/oc"
-import { CASOS_REALES, FIXTURES_REALES, crearRaizTemporal, huellaArbol, type RaizTemporal } from "./helpers"
+import { CASOS_REALES, FIXTURES_REALES, crearRaizTemporal, dataDe, huellaArbol, type RaizTemporal } from "./helpers"
 
 // ---------------------------------------------------------------------------
 // LLM determinista por reglas: sigue el flujo esperado del agente a partir del último mensaje.
@@ -32,7 +33,7 @@ class LlmReglas implements LlmAdapter {
   readonly modelo = "reglas-1"
   #n = 0
 
-  #tool(nombre: string, argumentos: Record<string, string>): RespuestaLlm {
+  #tool(nombre: string, argumentos: Record<string, unknown>): RespuestaLlm {
     return { texto: "", llamadas: [{ id: `toolu_r${++this.#n}`, nombre, argumentos }], motivo: "uso_tool", uso: USO, crudo: undefined }
   }
   #texto(texto: string): RespuestaLlm {
@@ -43,7 +44,12 @@ class LlmReglas implements LlmAdapter {
     const ultimo = mensajes.at(-1)
     if (ultimo?.rol === "usuario") {
       const nota = /caso=(sol-\d{3}) y payload_sha=([a-f0-9]{64})/.exec(ultimo.texto)
-      if (nota?.[1] !== undefined && nota[2] !== undefined) return this.#tool("oc_crear", { caso: nota[1], payload_sha: nota[2] })
+      if (nota?.[1] !== undefined && nota[2] !== undefined) {
+        // Retransmite el payload de oc_construir_payload, que debe ser el de la nota del runtime.
+        const payload = dataDe(mensajes, "oc_construir_payload")["payload"]
+        if (payloadSha(OrdenCompra.parse(payload)) !== nota[2]) return this.#texto("El payload no coincide con la confirmación.")
+        return this.#tool("oc_crear", { caso: nota[1], payload, confirmado: true })
+      }
       const caso = /sol-\d{3}/i.exec(ultimo.texto)?.[0]?.toLowerCase()
       return caso === undefined ? this.#texto("¿Qué caso proceso?") : this.#tool("oc_leer_paquete", { caso })
     }
@@ -55,13 +61,15 @@ class LlmReglas implements LlmAdapter {
     const err = r.error
     switch (llamada?.nombre) {
       case "oc_leer_paquete":
-        return r.ok ? this.#tool("oc_validar", { caso }) : this.#texto(`No pude leer ${caso}: ${err?.mensaje ?? ""}`)
+        return r.ok ? this.#tool("oc_validar", { caso, paquete: r.data }) : this.#texto(`No pude leer ${caso}: ${err?.mensaje ?? ""}`)
       case "oc_validar":
-        return r.data?.["apta"] === true ? this.#tool("oc_generar_evidencia", { caso }) : this.#tool("oc_crear", { caso })
+        return r.data?.["apta"] === true ? this.#tool("oc_generar_evidencia", { caso }) : this.#tool("oc_crear", { caso, payload: null })
       case "oc_generar_evidencia":
-        return r.ok ? this.#tool("oc_construir_payload", { caso }) : this.#texto(`Error: ${err?.codigo ?? ""}`)
+        return r.ok
+          ? this.#tool("oc_construir_payload", { caso, paquete: dataDe(mensajes, "oc_leer_paquete"), derivados: dataDe(mensajes, "oc_validar")["derivados"] })
+          : this.#texto(`Error: ${err?.codigo ?? ""}`)
       case "oc_construir_payload":
-        return r.ok ? this.#tool("oc_crear", { caso, payload_sha: String(r.data?.["payload_sha"]) }) : this.#texto(`Error: ${err?.codigo ?? ""}`)
+        return r.ok ? this.#tool("oc_crear", { caso, payload: r.data?.["payload"] }) : this.#texto(`Error: ${err?.codigo ?? ""}`)
       case "oc_crear":
         if (r.ok) return this.#texto(`OC ${String(r.data?.["numero_oc"])} creada para ${caso}.`)
         if (err?.codigo === "CONFIRMACION_REQUERIDA") return this.#texto(`La OC de ${caso} requiere confirmación. ¿Confirmas crearla?`)

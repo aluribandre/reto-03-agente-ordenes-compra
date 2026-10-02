@@ -8,10 +8,11 @@ import { cargarSistema } from "../src/agent/loop"
 import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, crearReloj } from "../src/config"
 import type { DefinicionTool, LlamadaTool, LlmAdapter, Mensaje, RespuestaLlm, ResultadoLlamada } from "../src/llm/adapter"
 import { leerJsonl } from "../src/persistencia"
-import { OrdenRegistrada } from "../src/schemas"
+import { payloadSha } from "../src/domain/sello"
+import { OrdenCompra, OrdenRegistrada } from "../src/schemas"
 import { crearApp } from "../src/server"
 import { registroOc } from "../src/tools/oc"
-import { CASOS_REALES, FIXTURES_REALES, crearRaizTemporal, huellaArbol, type RaizTemporal } from "./helpers"
+import { CASOS_REALES, FIXTURES_REALES, cargarOk, crearRaizTemporal, dataDe, huellaArbol, type RaizTemporal } from "./helpers"
 
 // ---------------------------------------------------------------------------
 // LLM guionado
@@ -56,14 +57,18 @@ function shaDeNota(mensajes: readonly Mensaje[]): string {
 
 const flujo = (caso: string, cierre: string): Paso[] => [
   pideTools(llamada("oc_leer_paquete", { caso })),
-  pideTools(llamada("oc_validar", { caso })),
+  (m) => pideTools(llamada("oc_validar", { caso, paquete: dataDe(m, "oc_leer_paquete") })),
   pideTools(llamada("oc_generar_evidencia", { caso })),
-  pideTools(llamada("oc_construir_payload", { caso })),
-  (m) => pideTools(llamada("oc_crear", { caso, payload_sha: dato(ultimo(m), "payload_sha") })),
+  (m) => pideTools(llamada("oc_construir_payload", { caso, paquete: dataDe(m, "oc_leer_paquete"), derivados: dataDe(m, "oc_validar")["derivados"] })),
+  (m) => pideTools(llamada("oc_crear", { caso, payload: dataDe(m, "oc_construir_payload")["payload"] })),
   (m) => responde(cierre.replace("{OC}", dato(ultimo(m), "numero_oc"))),
 ]
 const crearConfirmado = (caso: string): Paso[] => [
-  (m) => pideTools(llamada("oc_crear", { caso, payload_sha: shaDeNota(m) })),
+  (m) => {
+    const payload = dataDe(m, "oc_construir_payload")["payload"]
+    if (payloadSha(OrdenCompra.parse(payload)) !== shaDeNota(m)) throw new Error("el payload no corresponde a la nota del runtime")
+    return pideTools(llamada("oc_crear", { caso, payload, confirmado: true }))
+  },
   (m) => responde(`OC ${dato(ultimo(m), "numero_oc")} creada.`),
 ]
 
@@ -77,7 +82,17 @@ const Turno = z
     respuesta: z.string(),
     estado: z.string(),
     eventos: z.array(
-      z.object({ tipo: z.literal("tool"), herramienta: z.string(), caso: z.string().nullable(), ok: z.boolean(), codigo_error: z.string().nullable(), resumen: z.string() }).strict(),
+      z
+        .object({
+          tipo: z.literal("tool"),
+          herramienta: z.string(),
+          caso: z.string().nullable(),
+          argumentos: z.record(z.string(), z.unknown()),
+          ok: z.boolean(),
+          codigo_error: z.string().nullable(),
+          resumen: z.string(),
+        })
+        .strict(),
     ),
     needsConfirmation: z.boolean(),
     pendingConfirmation: z.object({ caso: z.string(), payload_sha: z.string(), reglas: z.array(z.string()) }).strict().nullable(),
@@ -250,6 +265,47 @@ describe("flujos de negocio por la API", () => {
     const estados = [x, y].map((r) => RespTurno.parse(r.cuerpo).data.estado).sort()
     expect(estados).toEqual(["completado", "confirmacion_invalida"])
     expect(await ordenes(raiz)).toHaveLength(1)
+  })
+
+  test("K. tool cards: cada evento trae nombre, argumentos recibidos (forma segura) y resultado resumido", async () => {
+    const { a } = await app([...flujo("sol-004", "¿Confirmas?"), ...crearConfirmado("sol-004")])
+    const t1 = RespTurno.parse((await post(a, "/api/chat", { sessionId: SA, message: "Procesa sol-004" })).cuerpo).data
+    const sha = t1.pendingConfirmation?.payload_sha ?? ""
+    const resumenPaquete = { solicitud_id: "SOL-2026-004", valor_total: 25_000_000, moneda: "COP" }
+    expect(t1.eventos.map((e) => [e.herramienta, e.argumentos])).toEqual([
+      ["oc_leer_paquete", { caso: "sol-004" }],
+      ["oc_validar", { caso: "sol-004", paquete: expect.objectContaining(resumenPaquete) }],
+      ["oc_generar_evidencia", { caso: "sol-004" }],
+      ["oc_construir_payload", { caso: "sol-004", paquete: expect.objectContaining(resumenPaquete), derivados: {} }],
+      ["oc_crear", { caso: "sol-004", payload: { payload_sha: sha } }],
+    ])
+    expect(t1.eventos.every((e) => e.resumen.length > 0)).toBe(true)
+    const t2 = RespTurno.parse((await post(a, "/api/confirm", { sessionId: SA, action: "confirm", caso: "sol-004", payload_sha: sha })).cuerpo).data
+    expect(t2.eventos.map((e) => e.argumentos)).toEqual([{ caso: "sol-004", payload: { payload_sha: sha }, confirmado: true }])
+  })
+
+  test("L. tool cards nunca incluyen textos de documentos, payload completo, rutas ni claves arbitrarias", async () => {
+    const { a, raiz } = await app([
+      ...flujo("sol-006", "¿Confirmas?"),
+      (m) => pideTools(llamada("oc_validar", { caso: "sol-006", paquete: dataDe(m, "oc_leer_paquete"), "<img src=x>": "inyección" })),
+      pideTools(llamada("oc_validar", { caso: "sol-006", paquete: "no es un paquete" })),
+      responde("Listo."),
+    ])
+    const t1 = RespTurno.parse((await post(a, "/api/chat", { sessionId: SA, message: "Procesa sol-006" })).cuerpo).data
+    const deriv = t1.eventos.find((e) => e.herramienta === "oc_construir_payload")?.argumentos["derivados"]
+    expect(deriv).toEqual({ indicador_iva: "C1", condiciones_pago: "Z030", proveedor_por_nombre: "100234" })
+    const t2 = RespTurno.parse((await post(a, "/api/chat", { sessionId: SA, message: "otra vez" })).cuerpo).data
+    expect(t2.eventos.map((e) => [e.codigo_error, e.argumentos])).toEqual([
+      ["ARGS_INVALIDOS", { caso: "sol-006", paquete: expect.objectContaining({ solicitud_id: "SOL-2026-006" }), "(clave no válida)": "(argumento no admitido)" }],
+      ["ARGS_INVALIDOS", { caso: "sol-006", paquete: "(no válido)" }],
+    ])
+    const paquete = await cargarOk("sol-006", raiz)
+    const sesion = await pedir(a, `/api/sessions/${SA}`)
+    for (const texto of [JSON.stringify(t1.eventos), JSON.stringify(t2.eventos), JSON.stringify(Reflect.get(Reflect.get(sesion.cuerpo as object, "data") as object, "eventos"))]) {
+      for (const prohibido of [paquete.aprobacion?.texto ?? "<sin aprobación>", paquete.cotizacion?.texto ?? "<sin cotización>", "posiciones", "descripcion", "evidencia_sha256", "<img", "inyección", raiz]) {
+        expect(texto).not.toContain(prohibido)
+      }
+    }
   })
 
   test("J. proveedor no configurado → 503 controlado y el servidor sigue vivo", async () => {

@@ -408,16 +408,32 @@ export const LineaLog = z.object({
 export type LineaLog = z.infer<typeof LineaLog>
 
 // ---------------------------------------------------------------------------
-// Contratos de las 5 tools P0 (congelados). Inputs: solo caso y referencias.
+// Contratos de las 5 tools P0 (PRD 6.2). Las firmas siguen el PRD, pero paquete, derivados,
+// payload y confirmado NO son fuente de verdad: cada tool los contrasta contra el estado
+// canónico (fixtures → dominio → payload sellado) y la autorización la pone solo el runtime.
 // ---------------------------------------------------------------------------
 
 export const ArgsSoloCaso = { caso: Caso }
 
+const PaqueteArg = Paquete.describe("Paquete exactamente como lo devolvió oc_leer_paquete para este caso; se verifica contra los fixtures")
+
+export const ArgsValidar = { caso: Caso, paquete: PaqueteArg }
+
+export const ArgsConstruir = {
+  caso: Caso,
+  paquete: PaqueteArg,
+  derivados: Derivados.describe("Derivados exactamente como los devolvió oc_validar; se verifican contra RC6/RC7"),
+}
+
 export const ArgsCrear = {
   caso: Caso,
-  payload_sha: Sha256.optional().describe(
-    "Hash del payload sellado que se pretende ejecutar; obligatorio salvo para registrar un intento bloqueado",
+  payload: OrdenCompra.nullable().describe(
+    "Payload exactamente como lo devolvió oc_construir_payload; se compara con el payload sellado. null solo para registrar el intento de un caso bloqueado",
   ),
+  confirmado: z
+    .boolean()
+    .optional()
+    .describe("true solo si el runtime registró la confirmación del usuario en este turno; es una declaración, no una autorización"),
 }
 
 export const DataLeerPaquete = Paquete.extend({ resumen: z.string() })

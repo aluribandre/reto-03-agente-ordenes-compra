@@ -1,12 +1,14 @@
 // Las 5 tools P0 de órdenes de compra (PRD 6.2). El modelo las ve como oc_<export>.
-// Inputs mínimos: { caso } o { caso, payload_sha? }. Todo dato de negocio se relee desde disco;
-// el modelo nunca es fuente de valores. Ninguna tool lanza: devuelven JSON { ok, data } | { ok: false, error }.
+// Firmas del PRD por fuera; datos reconstruidos y verificados por dentro: paquete, derivados y payload
+// recibidos se comparan con el estado canónico (fixtures → dominio → payload sellado) y nunca se usan
+// como fuente de valores; `confirmado` es una declaración, no una autorización.
+// Ninguna tool lanza: devuelven JSON { ok, data } | { ok: false, error }.
 import { resolve } from "node:path"
 import { z } from "zod"
 import { evaluarControles, type EvaluacionControles } from "../domain/controles"
 import { construirEvidencia, renderArchivoEvidencia } from "../domain/evidencia"
 import { construirPayload, validarCatalogos } from "../domain/payload"
-import { payloadSha } from "../domain/sello"
+import { jsonCanonico, payloadSha } from "../domain/sello"
 import { cargarAprobacionFuente, cargarCaso, cargarMaestros } from "../ingestion/cargar"
 import {
   ARCHIVOS,
@@ -24,8 +26,10 @@ import {
 import type { SapAdapter } from "../sap/adapter"
 import { MockSapAdapter } from "../sap/mock"
 import {
+  ArgsConstruir,
   ArgsCrear,
   ArgsSoloCaso,
+  ArgsValidar,
   Autorizacion,
   Fecha,
   NumeroOc,
@@ -35,9 +39,11 @@ import {
   type DataEvidencia,
   type DataLeerPaquete,
   type DataValidar,
+  type Derivados,
   type ErrorTool,
   type FilaControl,
   type Maestros,
+  type OrdenCompra,
   type Paquete,
   type PayloadSellado,
   type Regla,
@@ -54,8 +60,10 @@ export const DEPENDENCIAS_POR_DEFECTO: DependenciasOc = {
 }
 
 const MAX_TEXTO_LLM = 4000
-const EsquemaSoloCaso = z.object(ArgsSoloCaso)
-const EsquemaCrear = z.object(ArgsCrear)
+const EsquemaSoloCaso = z.object(ArgsSoloCaso).strict()
+const EsquemaValidar = z.object(ArgsValidar).strict()
+const EsquemaConstruir = z.object(ArgsConstruir).strict()
+const EsquemaCrear = z.object(ArgsCrear).strict()
 const RespuestaSap = z.object({ numero_oc: NumeroOc, fecha: Fecha })
 
 // ---------------------------------------------------------------------------
@@ -146,6 +154,58 @@ function limitar(texto: string): string {
   return texto.length > MAX_TEXTO_LLM ? `${texto.slice(0, MAX_TEXTO_LLM)}…` : texto
 }
 
+// Paquete tal como lo ve el modelo (textos largos acotados). Es la referencia contra la que se
+// verifica el paquete que el modelo devuelve a oc_validar / oc_construir_payload.
+export function vistaPaquete(p: Paquete): Paquete {
+  return {
+    ...p,
+    cotizacion: p.cotizacion === null ? null : { ...p.cotizacion, texto: limitar(p.cotizacion.texto) },
+    aprobacion: p.aprobacion === null ? null : { ...p.aprobacion, texto: limitar(p.aprobacion.texto) },
+  }
+}
+
+const MAX_RUTAS_DISTINTAS = 10
+
+// Rutas en las que dos valores JSON difieren. Solo rutas: los valores nunca se devuelven.
+function rutasDistintas(recibido: unknown, canonico: unknown, ruta = "", salida: string[] = []): string[] {
+  if (salida.length >= MAX_RUTAS_DISTINTAS) return salida
+  const sonObjetos = typeof recibido === "object" && recibido !== null && typeof canonico === "object" && canonico !== null
+  if (sonObjetos && Array.isArray(recibido) === Array.isArray(canonico)) {
+    const claves = [...new Set([...Object.keys(recibido), ...Object.keys(canonico)])].sort()
+    for (const clave of claves) rutasDistintas(Reflect.get(recibido, clave), Reflect.get(canonico, clave), ruta === "" ? clave : `${ruta}.${clave}`, salida)
+    return salida
+  }
+  if (jsonCanonico(recibido ?? null) !== jsonCanonico(canonico ?? null)) salida.push(ruta === "" ? "(raíz)" : ruta)
+  return salida
+}
+
+// El argumento del modelo debe ser idéntico (JSON canónico) al valor canónico; si no, se rechaza.
+// Nunca se "prefiere" el argumento: las tools siempre trabajan con el valor canónico.
+function exigirIgual(recibido: unknown, canonico: unknown, motivo: string, mensaje: string, sugerencia: string): void {
+  if (jsonCanonico(recibido) === jsonCanonico(canonico)) return
+  fallar("ARGS_INVALIDOS", mensaje, sugerencia, { motivo, campos: rutasDistintas(recibido, canonico) })
+}
+
+function verificarPaquete(recibido: Paquete, canonico: Paquete): void {
+  exigirIgual(
+    recibido,
+    vistaPaquete(canonico),
+    "paquete_no_coincide",
+    "El paquete recibido no coincide con el caso leído de los fixtures; no se usa.",
+    "Pasar el paquete exactamente como lo devolvió oc_leer_paquete, sin modificarlo.",
+  )
+}
+
+function verificarDerivados(recibidos: Derivados, canonicos: Derivados): void {
+  exigirIgual(
+    recibidos,
+    canonicos,
+    "derivados_no_coinciden",
+    "Los derivados recibidos no coinciden con los calculados por los controles (RC6/RC7); no se usan.",
+    "Pasar los derivados exactamente como los devolvió oc_validar, sin modificarlos.",
+  )
+}
+
 async function llamarSap<T>(llamada: () => Promise<T>): Promise<T> {
   try {
     return await llamada()
@@ -222,7 +282,7 @@ async function respuestaIdempotente(
   }
 }
 
-async function crearOc(caso: string, shaArg: string | undefined, ctx: ContextoTool, deps: DependenciasOc): Promise<DataCrear> {
+async function crearOc(caso: string, payloadArg: OrdenCompra | null, confirmado: boolean | undefined, ctx: ContextoTool, deps: DependenciasOc): Promise<DataCrear> {
   const { paquete, maestros, evaluacion } = await cargarYEvaluar(caso, ctx)
   const solicitudId = paquete.solicitud.solicitud_id
   const sap = deps.crearSap(ctx, maestros)
@@ -257,12 +317,14 @@ async function crearOc(caso: string, shaArg: string | undefined, ctx: ContextoTo
       motivo: "hash_almacenado_no_coincide",
     })
   }
-  if (shaArg === undefined) {
-    fallar("ARGS_INVALIDOS", "payload_sha es obligatorio para crear la OC de un caso apto.", "Pasar el payload_sha devuelto por oc_construir_payload.")
+  // El payload recibido solo se compara con el sellado (mismo hash canónico); nunca se persiste ni se envía a SAP.
+  if (payloadArg === null) {
+    fallar("ARGS_INVALIDOS", "payload es obligatorio para crear la OC de un caso apto.", "Pasar el payload devuelto por oc_construir_payload.")
   }
-  if (shaArg !== sellado.payload_sha) {
-    fallar("PAYLOAD_NO_COINCIDE", "El payload_sha indicado no corresponde al payload sellado.", "Usar el payload_sha devuelto por oc_construir_payload.", {
-      motivo: "payload_sha_distinto",
+  if (payloadSha(payloadArg) !== sellado.payload_sha) {
+    fallar("PAYLOAD_NO_COINCIDE", "El payload recibido no corresponde al payload sellado.", "Pasar exactamente el payload devuelto por oc_construir_payload, sin modificarlo.", {
+      motivo: "payload_distinto",
+      payload_sha_sellado: sellado.payload_sha,
     })
   }
   if (listar(sellado.confirmaciones) !== listar(reglas(evaluacion.confirmaciones))) {
@@ -276,6 +338,7 @@ async function crearOc(caso: string, shaArg: string | undefined, ctx: ContextoTo
   }
 
   // 4. Autorización humana (la pone el runtime en ctx; nunca un argumento del modelo).
+  //    `confirmado` no autoriza: sin ctx.autorizacion válida no hay OC, diga lo que diga el argumento.
   let autorizacion: Autorizacion | null = null
   if (sellado.confirmaciones.length > 0) {
     if (ctx.autorizacion === undefined) {
@@ -290,6 +353,12 @@ async function crearOc(caso: string, shaArg: string | undefined, ctx: ContextoTo
       await registrar("pendiente")
       fallar("AUTORIZACION_INVALIDA", "La autorización no corresponde a esta acción, caso, payload, sesión o turno.", "Pedir una nueva confirmación explícita del usuario.", {
         motivo,
+      })
+    }
+    // Autorización válida pero la llamada no declara la confirmación: inconsistencia, no se ejecuta.
+    if (confirmado !== true) {
+      fallar("ARGS_INVALIDOS", "Hay una confirmación registrada, pero la llamada no declara confirmado=true; no se crea la OC.", "Pedir al usuario una nueva confirmación.", {
+        motivo: "confirmado_inconsistente",
       })
     }
     autorizacion = Autorizacion.parse(ctx.autorizacion)
@@ -323,7 +392,9 @@ async function crearOc(caso: string, shaArg: string | undefined, ctx: ContextoTo
 // ---------------------------------------------------------------------------
 
 type ArgsCaso = { caso: string }
-type ArgsCrearOc = { caso: string; payload_sha?: string }
+type ArgsValidarOc = z.infer<typeof EsquemaValidar>
+type ArgsConstruirOc = z.infer<typeof EsquemaConstruir>
+type ArgsCrearOc = z.infer<typeof EsquemaCrear>
 
 export function crearHerramientasOc(deps: DependenciasOc = DEPENDENCIAS_POR_DEFECTO) {
   const leer_paquete: Herramienta<ArgsCaso> = {
@@ -334,21 +405,23 @@ export function crearHerramientasOc(deps: DependenciasOc = DEPENDENCIAS_POR_DEFE
         const { caso } = parsearArgs(EsquemaSoloCaso, args)
         const p = exigir(await cargarCaso(caso, { raiz: ctx.directory }))
         return {
-          ...p,
-          cotizacion: p.cotizacion === null ? null : { ...p.cotizacion, texto: limitar(p.cotizacion.texto) },
-          aprobacion: p.aprobacion === null ? null : { ...p.aprobacion, texto: limitar(p.aprobacion.texto) },
+          ...vistaPaquete(p),
           resumen: `${p.solicitud.solicitud_id}: paquete leído; faltantes: ${listar(p.faltantes.map((f) => f.pieza))}`,
         }
       }),
   }
 
-  const validar: Herramienta<ArgsCaso> = {
-    description: "Aplica los controles RC1–RC10 al paquete de un caso contra los maestros y devuelve bloqueos, confirmaciones y valores derivados.",
-    args: ArgsSoloCaso,
+  const validar: Herramienta<ArgsValidarOc> = {
+    description:
+      "Aplica los controles RC1–RC10 al paquete de un caso contra los maestros y devuelve bloqueos, confirmaciones y valores derivados; el paquete debe ser el devuelto por oc_leer_paquete.",
+    args: ArgsValidar,
     execute: (args, ctx) =>
       ejecutar(async (): Promise<DataValidar> => {
-        const { caso } = parsearArgs(EsquemaSoloCaso, args)
-        const { evaluacion } = await cargarYEvaluar(caso, ctx)
+        const { caso, paquete } = parsearArgs(EsquemaValidar, args)
+        const evaluado = await cargarYEvaluar(caso, ctx)
+        verificarPaquete(paquete, evaluado.paquete)
+        // Los controles se evalúan solo sobre el paquete canónico.
+        const { evaluacion } = evaluado
         return {
           ...evaluacion,
           resumen: `${evaluacion.solicitud_id}: apta=${evaluacion.apta}; bloqueos=${listar(reglas(evaluacion.bloqueos))}; confirmaciones=${listar(reglas(evaluacion.confirmaciones))}`,
@@ -382,13 +455,18 @@ export function crearHerramientasOc(deps: DependenciasOc = DEPENDENCIAS_POR_DEFE
       }),
   }
 
-  const construir_payload: Herramienta<ArgsCaso> = {
-    description: "Construye, valida y sella la orden de compra de un caso no bloqueado, con trazabilidad de cada campo; no la crea en SAP.",
-    args: ArgsSoloCaso,
+  const construir_payload: Herramienta<ArgsConstruirOc> = {
+    description:
+      "Construye, valida y sella la orden de compra de un caso no bloqueado, con trazabilidad de cada campo; no la crea en SAP. Paquete y derivados deben ser los devueltos por oc_leer_paquete y oc_validar.",
+    args: ArgsConstruir,
     execute: (args, ctx) =>
       ejecutar(async (): Promise<DataConstruirPayload> => {
-        const { caso } = parsearArgs(EsquemaSoloCaso, args)
+        const recibido = parsearArgs(EsquemaConstruir, args)
+        const { caso } = recibido
         const { paquete, maestros, evaluacion } = await cargarYEvaluar(caso, ctx)
+        verificarPaquete(recibido.paquete, paquete)
+        verificarDerivados(recibido.derivados, evaluacion.derivados)
+        // Desde aquí solo se usan valores canónicos: paquete, maestros y evaluación recalculados.
         exigirApta(evaluacion, "construye el payload")
 
         const archivo = await leerEvidencia(ctx.directory, caso)
@@ -434,12 +512,13 @@ export function crearHerramientasOc(deps: DependenciasOc = DEPENDENCIAS_POR_DEFE
   }
 
   const crear: Herramienta<ArgsCrearOc> = {
-    description: "Crea en SAP la orden de compra sellada de un caso si está apta y, cuando corresponde, confirmada por el usuario; es idempotente por solicitud_id.",
+    description:
+      "Crea en SAP la orden de compra sellada de un caso si está apta y, cuando corresponde, confirmada por el usuario; el payload debe ser el devuelto por oc_construir_payload; es idempotente por solicitud_id.",
     args: ArgsCrear,
     execute: (args, ctx) =>
       ejecutar(async (): Promise<DataCrear> => {
-        const { caso, payload_sha } = parsearArgs(EsquemaCrear, args)
-        return conCandado(`crear:${resolve(ctx.directory)}:${caso}`, () => crearOc(caso, payload_sha, ctx, deps))
+        const { caso, payload, confirmado } = parsearArgs(EsquemaCrear, args)
+        return conCandado(`crear:${resolve(ctx.directory)}:${caso}`, () => crearOc(caso, payload, confirmado, ctx, deps))
       }),
   }
 

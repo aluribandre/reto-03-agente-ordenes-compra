@@ -11,7 +11,8 @@ import { cargarConfig, type Reloj } from "./config"
 import type { LlmAdapter } from "./llm/adapter"
 import { AnthropicAdapter } from "./llm/anthropic"
 import { conCandado } from "./persistencia"
-import { Caso, Sha256 } from "./schemas"
+import { payloadSha } from "./domain/sello"
+import { Caso, Derivados, OrdenCompra, Paquete, Sha256 } from "./schemas"
 import { registroOc } from "./tools/oc"
 import type { Herramienta } from "./tools/runner"
 
@@ -97,13 +98,79 @@ function validar<T>(esquema: z.ZodType<T>, valor: unknown): T {
 // Proyección segura para la UI (sin argumentos completos, sin crudo, sin rutas)
 // ---------------------------------------------------------------------------
 
-export type EventoUI = { tipo: "tool"; herramienta: string; caso: string | null; ok: boolean; codigo_error: string | null; resumen: string }
+export type ValorArgumento = string | number | boolean | null | Record<string, string | number | null>
+export type EventoUI = {
+  tipo: "tool"
+  herramienta: string
+  caso: string | null
+  argumentos: Record<string, ValorArgumento>
+  ok: boolean
+  codigo_error: string | null
+  resumen: string
+}
 
 const ArgsConCaso = z.object({ caso: Caso }).loose()
+const NO_VALIDO = "(no válido)"
+const MAX_CLAVES_VISIBLES = 10
+
+// Argumentos de una llamada a tool tal como los recibió (PRD 6.1), en una forma segura:
+// valores simples tal cual; objetos grandes por identificadores o hash. Nunca textos de
+// documentos, rutas ni objetos internos completos.
+function argumentoVisible(clave: string, valor: unknown): ValorArgumento {
+  switch (clave) {
+    case "caso": {
+      const r = Caso.safeParse(valor)
+      return r.success ? r.data : NO_VALIDO
+    }
+    case "confirmado":
+      return typeof valor === "boolean" ? valor : NO_VALIDO
+    case "paquete": {
+      const r = Paquete.safeParse(valor)
+      if (!r.success) return NO_VALIDO
+      const s = r.data.solicitud
+      return { solicitud_id: s.solicitud_id, proveedor_nit: s.proveedor_nit ?? null, valor_total: s.valor_total, moneda: s.moneda }
+    }
+    case "derivados": {
+      const r = Derivados.safeParse(valor)
+      if (!r.success) return NO_VALIDO
+      const d = r.data
+      return {
+        ...(d.indicador_iva ? { indicador_iva: d.indicador_iva.valor } : {}),
+        ...(d.condiciones_pago ? { condiciones_pago: d.condiciones_pago.valor } : {}),
+        ...(d.proveedor_por_nombre ? { proveedor_por_nombre: d.proveedor_por_nombre.codigo_sap } : {}),
+      }
+    }
+    case "payload": {
+      if (valor === null) return null
+      const r = OrdenCompra.safeParse(valor)
+      return r.success ? { payload_sha: payloadSha(r.data) } : NO_VALIDO
+    }
+    default:
+      return "(argumento no admitido)"
+  }
+}
+
+function argumentosVisibles(argumentos: unknown): Record<string, ValorArgumento> {
+  if (typeof argumentos !== "object" || argumentos === null || Array.isArray(argumentos)) return {}
+  const visibles: Record<string, ValorArgumento> = {}
+  for (const [clave, valor] of Object.entries(argumentos).slice(0, MAX_CLAVES_VISIBLES)) {
+    // Una clave arbitraria del modelo no se refleja tal cual.
+    visibles[/^[a-z_]{1,32}$/.test(clave) ? clave : "(clave no válida)"] = argumentoVisible(clave, valor)
+  }
+  return visibles
+}
 
 function aEventoUI(e: EventoTool): EventoUI {
   const args = ArgsConCaso.safeParse(e.argumentos)
-  return { tipo: "tool", herramienta: e.herramienta, caso: args.success ? args.data.caso : null, ok: e.ok, codigo_error: e.codigo_error, resumen: e.resumen }
+  return {
+    tipo: "tool",
+    herramienta: e.herramienta,
+    caso: args.success ? args.data.caso : null,
+    argumentos: argumentosVisibles(e.argumentos),
+    ok: e.ok,
+    codigo_error: e.codigo_error,
+    resumen: e.resumen,
+  }
 }
 
 function vistaTurno(sessionId: string, r: ResultadoTurno) {

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { RAIZ_PROYECTO } from "../src/config"
 import { cargarCaso } from "../src/ingestion/cargar"
+import type { Mensaje } from "../src/llm/adapter"
 import type { ErrorTool, Paquete } from "../src/schemas"
 
 export const FIXTURES_REALES = join(RAIZ_PROYECTO, "fixtures", "reto-03")
@@ -65,6 +66,24 @@ export async function convertirACrlf(dir: string): Promise<void> {
     const texto = await readFile(archivo, "utf8")
     await writeFile(archivo, texto.replace(/\r?\n/g, "\r\n"), "utf8")
   }
+}
+
+// Último `data` exitoso de una tool en un historial del agente. Los LLM de prueba lo usan para
+// retransmitir exactamente lo que devolvió la herramienta (contrato PRD 6.2), como el modelo real.
+export function dataDe(mensajes: readonly Mensaje[], herramienta: string): Record<string, unknown> {
+  for (let i = mensajes.length - 1; i > 0; i--) {
+    const m = mensajes[i]
+    const previo = mensajes[i - 1]
+    if (m?.rol !== "resultados" || previo?.rol !== "asistente") continue
+    for (const r of m.resultados) {
+      if (previo.llamadas.find((l) => l.id === r.id)?.nombre !== herramienta) continue
+      const crudo: unknown = JSON.parse(r.contenido)
+      if (typeof crudo === "object" && crudo !== null && "ok" in crudo && crudo.ok === true && "data" in crudo && typeof crudo.data === "object" && crudo.data !== null) {
+        return { ...crudo.data }
+      }
+    }
+  }
+  throw new Error(`no hay un resultado exitoso de ${herramienta} en el historial`)
 }
 
 export async function cargarOk(caso: string, raiz?: string): Promise<Paquete> {

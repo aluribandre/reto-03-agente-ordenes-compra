@@ -67,7 +67,7 @@ export function definicionesTools(herramientas: Record<string, Herramienta<never
   return Object.entries(herramientas)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([nombre, h]) => {
-      const esquema: Record<string, unknown> = { ...z.toJSONSchema(z.object(h.args)) }
+      const esquema: Record<string, unknown> = { ...z.toJSONSchema(z.object(h.args).strict()) }
       delete esquema["$schema"]
       return { nombre, descripcion: h.description, esquema }
     })

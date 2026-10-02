@@ -65,7 +65,8 @@ export async function ejecutarTool(
 ): Promise<string> {
   const cronometro = opciones.cronometro ?? (() => performance.now())
   const inicio = cronometro()
-  const args = z.object(herramienta.args).safeParse(argsCrudos)
+  // Estricto: un argumento no documentado es un error, no se descarta en silencio.
+  const args = z.object(herramienta.args).strict().safeParse(argsCrudos)
 
   let salida: string
   if (!args.success) {

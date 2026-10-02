@@ -66,6 +66,20 @@ function mensaje(rol, texto) {
   bajar();
 }
 
+// Argumentos que recibió la tool, ya saneados por el servidor (objetos grandes vienen resumidos).
+function valorArgumento(v) {
+  if (v !== null && typeof v === "object") {
+    const partes = Object.entries(v).map(([k, x]) => `${k}=${k === "payload_sha" && typeof x === "string" ? `${x.slice(0, 12)}…` : String(x)}`);
+    return `{${partes.join(", ")}}`;
+  }
+  return String(v);
+}
+
+function textoArgumentos(argumentos) {
+  if (!argumentos || typeof argumentos !== "object") return "";
+  return Object.entries(argumentos).map(([k, v]) => `${k}: ${valorArgumento(v)}`).join(" · ");
+}
+
 function tarjetas(eventos) {
   if (!eventos || eventos.length === 0) return;
   const grupo = el("div", "herramientas");
@@ -77,6 +91,8 @@ function tarjetas(eventos) {
     const oc = e.ok && e.herramienta === "oc_crear" ? /\b45\d{8}\b/.exec(e.resumen) : null;
     if (oc) titulo.appendChild(el("span", "oc", `OC ${oc[0]}`));
     tarjeta.appendChild(titulo);
+    const args = textoArgumentos(e.argumentos);
+    if (args) tarjeta.appendChild(el("span", "args", args));
     tarjeta.appendChild(el("span", "resumen", e.resumen));
     grupo.appendChild(tarjeta);
   }

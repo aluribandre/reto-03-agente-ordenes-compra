@@ -70,7 +70,7 @@ type Respuesta<T> = { ok: true; data: T } | { ok: false; error: ErrorTool }
 async function llamar<T>(
   registro: Record<string, Herramienta<never>>,
   nombre: string,
-  args: Record<string, string>,
+  args: Record<string, unknown>,
   esquema: z.ZodType<T>,
   ctx: ContextoTool,
 ): Promise<Respuesta<T>> {
@@ -115,18 +115,21 @@ async function ejecutarPaso(n: number, paso: Paso, registro: Record<string, Herr
   const ctx: ContextoTool = { directory: raiz, sessionId: SESION_DEMO, turnoId: `demo-turno-${n}`, reloj }
   const { caso } = paso
 
-  exigir(await llamar(registro, "oc_leer_paquete", { caso }, DataLeerPaquete, ctx), `${caso} leer`)
-  const v = exigir(await llamar(registro, "oc_validar", { caso }, DataValidar, ctx), `${caso} validar`)
+  // Cada tool recibe exactamente lo que devolvió la anterior (contrato PRD 6.2).
+  const paquete = exigir(await llamar(registro, "oc_leer_paquete", { caso }, DataLeerPaquete, ctx), `${caso} leer`)
+  const v = exigir(await llamar(registro, "oc_validar", { caso, paquete }, DataValidar, ctx), `${caso} validar`)
 
-  let payloadSha: string | null = null
+  let construido: DataConstruirPayload | null = null
   if (v.apta) {
     exigir(await llamar(registro, "oc_generar_evidencia", { caso }, DataEvidencia, ctx), `${caso} evidencia`)
-    payloadSha = exigir(await llamar(registro, "oc_construir_payload", { caso }, DataConstruirPayload, ctx), `${caso} payload`).payload_sha
+    construido = exigir(await llamar(registro, "oc_construir_payload", { caso, paquete, derivados: v.derivados }, DataConstruirPayload, ctx), `${caso} payload`)
   }
 
-  const autorizado = paso.autorizar && payloadSha !== null
-  const ctxCrear: ContextoTool = autorizado && payloadSha !== null ? { ...ctx, autorizacion: autorizacionSimulada(caso, payloadSha, ctx.turnoId, reloj()) } : ctx
-  const r = await llamar(registro, "oc_crear", payloadSha === null ? { caso } : { caso, payload_sha: payloadSha }, DataCrear, ctxCrear)
+  const autorizado = paso.autorizar && construido !== null
+  const ctxCrear: ContextoTool =
+    autorizado && construido !== null ? { ...ctx, autorizacion: autorizacionSimulada(caso, construido.payload_sha, ctx.turnoId, reloj()) } : ctx
+  const argsCrear = construido === null ? { caso, payload: null } : { caso, payload: construido.payload, ...(autorizado ? { confirmado: true } : {}) }
+  const r = await llamar(registro, "oc_crear", argsCrear, DataCrear, ctxCrear)
 
   return {
     n,

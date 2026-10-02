@@ -9,11 +9,12 @@ import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, crearReloj } from "../src/config"
 import { ErrorLlm, type DefinicionTool, type LlamadaTool, type LlmAdapter, type Mensaje, type RespuestaLlm, type ResultadoLlamada } from "../src/llm/adapter"
 import { AnthropicAdapter, traducirError } from "../src/llm/anthropic"
 import { clasificarMensaje, efectoSobreAutorizacion, resolverEntrada, type PendienteConfirmacion } from "../src/agent/autorizacion"
-import { leerControl, leerEjecucion, leerJsonl } from "../src/persistencia"
+import { payloadSha } from "../src/domain/sello"
+import { leerControl, leerEjecucion, leerJsonl, leerPayloadSellado } from "../src/persistencia"
 import { MockSapAdapter } from "../src/sap/mock"
-import { LineaLog, OrdenRegistrada, type Autorizacion } from "../src/schemas"
+import { LineaLog, OrdenCompra, OrdenRegistrada, type Autorizacion } from "../src/schemas"
 import { crearHerramientasOc, registroOc } from "../src/tools/oc"
-import { CASOS_REALES, FIXTURES_REALES, crearRaizTemporal, huellaArbol, type RaizTemporal } from "./helpers"
+import { CASOS_REALES, FIXTURES_REALES, crearRaizTemporal, dataDe, huellaArbol, type RaizTemporal } from "./helpers"
 
 // ---------------------------------------------------------------------------
 // LLM guionado
@@ -61,6 +62,16 @@ function dato(resultado: ResultadoLlamada | undefined, campo: string): string {
   }
   throw new Error(`el resultado no trae data.${campo}`)
 }
+
+// El LLM guionado retransmite exactamente lo que devolvió cada tool (contrato PRD 6.2).
+const payloadShaDe = (payload: unknown): string => payloadSha(OrdenCompra.parse(payload))
+const argsValidar = (m: readonly Mensaje[], caso: string) => ({ caso, paquete: dataDe(m, "oc_leer_paquete") })
+const argsConstruir = (m: readonly Mensaje[], caso: string) => ({ caso, paquete: dataDe(m, "oc_leer_paquete"), derivados: dataDe(m, "oc_validar")["derivados"] })
+const argsCrear = (m: readonly Mensaje[], caso: string, confirmado?: boolean) => ({
+  caso,
+  payload: dataDe(m, "oc_construir_payload")["payload"],
+  ...(confirmado === undefined ? {} : { confirmado }),
+})
 
 // ---------------------------------------------------------------------------
 
@@ -121,10 +132,10 @@ describe("ciclo básico", () => {
   test("C. sol-001: leer → validar → evidencia → payload → crear → respuesta con la OC", async () => {
     const { llm, sesion, op, raiz } = await entorno([
       pideTools(llamada("oc_leer_paquete", { caso: "sol-001" })),
-      pideTools(llamada("oc_validar", { caso: "sol-001" })),
+      (m) => pideTools(llamada("oc_validar", argsValidar(m, "sol-001"))),
       pideTools(llamada("oc_generar_evidencia", { caso: "sol-001" })),
-      pideTools(llamada("oc_construir_payload", { caso: "sol-001" })),
-      (m) => pideTools(llamada("oc_crear", { caso: "sol-001", payload_sha: dato(ultimosResultados(m)[0], "payload_sha") })),
+      (m) => pideTools(llamada("oc_construir_payload", argsConstruir(m, "sol-001"))),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-001"))),
       (m) => responde(`OC creada: ${dato(ultimosResultados(m)[0], "numero_oc")}`),
     ])
     const r = await ejecutarTurno(sesion, "procesa sol-001", op)
@@ -146,8 +157,8 @@ describe("ciclo básico", () => {
   test("D. sol-002 bloqueada: el modelo recibe CASO_BLOQUEADO y no existe OC", async () => {
     const { llm, sesion, op, raiz } = await entorno([
       pideTools(llamada("oc_leer_paquete", { caso: "sol-002" })),
-      pideTools(llamada("oc_validar", { caso: "sol-002" })),
-      pideTools(llamada("oc_crear", { caso: "sol-002" })),
+      (m) => pideTools(llamada("oc_validar", argsValidar(m, "sol-002"))),
+      pideTools(llamada("oc_crear", { caso: "sol-002", payload: null })),
       responde("No se creó la OC: el proveedor no existe en el maestro."),
     ])
     const r = await ejecutarTurno(sesion, "procesa sol-002", op)
@@ -164,8 +175,8 @@ describe("ciclo básico", () => {
 
 describe("errores y resiliencia", () => {
   test("E. error de tool: el loop continúa y el modelo recibe el error estructurado", async () => {
-    const { llm, sesion, op } = await entorno([pideTools(llamada("oc_validar", { caso: "sol-999" })), responde("Ese caso no existe.")])
-    const r = await ejecutarTurno(sesion, "valida sol-999", op)
+    const { llm, sesion, op } = await entorno([pideTools(llamada("oc_leer_paquete", { caso: "sol-999" })), responde("Ese caso no existe.")])
+    const r = await ejecutarTurno(sesion, "lee sol-999", op)
     expect(r.estado).toBe("completado")
     const resultado = ultimosResultados(llm.recibidos[1]?.mensajes ?? [])[0]
     expect(resultado?.esError).toBe(true)
@@ -268,10 +279,10 @@ describe("guardrails, confirmación e historial", () => {
   test("L. sol-004 sin autorización: CONFIRMACION_REQUERIDA, sin OC, el turno cierra con una pregunta", async () => {
     const { llm, sesion, op, raiz } = await entorno([
       pideTools(llamada("oc_leer_paquete", { caso: "sol-004" })),
-      pideTools(llamada("oc_validar", { caso: "sol-004" })),
+      (m) => pideTools(llamada("oc_validar", argsValidar(m, "sol-004"))),
       pideTools(llamada("oc_generar_evidencia", { caso: "sol-004" })),
-      pideTools(llamada("oc_construir_payload", { caso: "sol-004" })),
-      (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: dato(ultimosResultados(m)[0], "payload_sha") })),
+      (m) => pideTools(llamada("oc_construir_payload", argsConstruir(m, "sol-004"))),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004"))),
       responde("La cotización difiere 6 % de la solicitud. ¿Confirmas crear la OC por COP 25.000.000?"),
     ])
     const r = await ejecutarTurno(sesion, "procesa sol-004", op)
@@ -307,8 +318,17 @@ describe("herramientas expuestas y adaptador", () => {
       expect(() => JSON.stringify(d)).not.toThrow()
     }
     const crear = defs.find((d) => d.nombre === "oc_crear")
-    expect(crear?.esquema["required"]).toEqual(["caso"])
-    expect(Object.keys((crear?.esquema["properties"] ?? {}) as object).sort()).toEqual(["caso", "payload_sha"])
+    // Firmas literales del PRD 6.2, sin propiedades adicionales.
+    const firma = (nombre: string) => {
+      const d = defs.find((x) => x.nombre === nombre)
+      return [Object.keys((d?.esquema["properties"] ?? {}) as object).sort(), d?.esquema["required"], d?.esquema["additionalProperties"]]
+    }
+    expect(firma("oc_leer_paquete")).toEqual([["caso"], ["caso"], false])
+    expect(firma("oc_validar")).toEqual([["caso", "paquete"], ["caso", "paquete"], false])
+    expect(firma("oc_generar_evidencia")).toEqual([["caso"], ["caso"], false])
+    expect(firma("oc_construir_payload")).toEqual([["caso", "derivados", "paquete"], ["caso", "paquete", "derivados"], false])
+    expect(firma("oc_crear")).toEqual([["caso", "confirmado", "payload"], ["caso", "payload"], false])
+    expect(crear?.descripcion).toContain("payload")
   })
 
   test("AnthropicAdapter se construye sin clave explícita y expone proveedor y modelo", () => {
@@ -336,16 +356,21 @@ function shaDeNota(mensajes: readonly Mensaje[]): string {
 // Turno N: proceso completo hasta CONFIRMACION_REQUERIDA (el modelo intenta crear en el mismo turno).
 const pasosPendiente = (caso: string, cierre = "¿Confirmas crear la OC?"): Paso[] => [
   pideTools(llamada("oc_leer_paquete", { caso })),
-  pideTools(llamada("oc_validar", { caso })),
+  (m) => pideTools(llamada("oc_validar", argsValidar(m, caso))),
   pideTools(llamada("oc_generar_evidencia", { caso })),
-  pideTools(llamada("oc_construir_payload", { caso })),
-  (m) => pideTools(llamada("oc_crear", { caso, payload_sha: dato(ultimosResultados(m)[0], "payload_sha") })),
+  (m) => pideTools(llamada("oc_construir_payload", argsConstruir(m, caso))),
+  (m) => pideTools(llamada("oc_crear", argsCrear(m, caso))),
   responde(cierre),
 ]
 
 // Turno N+1: el modelo crea con el caso y payload_sha de la nota del runtime.
 const pasosCrearConfirmado = (caso: string): Paso[] => [
-  (m) => pideTools(llamada("oc_crear", { caso, payload_sha: shaDeNota(m) })),
+  (m) => {
+    // El payload que se retransmite es el de la nota del runtime.
+    const args = argsCrear(m, caso, true)
+    if (payloadShaDe(args.payload) !== shaDeNota(m)) throw new Error("el payload no corresponde a la nota del runtime")
+    return pideTools(llamada("oc_crear", args))
+  },
   (m) => responde(`OC ${dato(ultimosResultados(m)[0], "numero_oc")} creada.`),
 ]
 
@@ -428,10 +453,7 @@ describe("F9 · confirmación por mensaje", () => {
       ...pasosPendiente("sol-004"),
       responde("De acuerdo, espero."),
       // Turno N+2: el modelo intenta crear con el payload de N; no hay autorización en el runtime.
-      (m) => {
-        const sha = [...m].reverse().flatMap((x) => (x.rol === "resultados" ? x.resultados : [])).map((r) => /"payload_sha":"([a-f0-9]{64})"/.exec(r.contenido)?.[1]).find((s) => s !== undefined)
-        return pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: sha ?? "" }))
-      },
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
       responde("No se creó: falta la confirmación."),
     ])
     await ejecutarTurno(sesion, "procesa sol-004", op)
@@ -449,8 +471,8 @@ describe("F9 · confirmación por mensaje", () => {
   test("Q. un error de tool en el turno de confirmación no rompe la sesión ni consume la autorización", async () => {
     const { sesion, op, raiz } = await entorno([
       ...pasosPendiente("sol-004"),
-      pideTools(llamada("oc_crear", { caso: "sol-999" })),
-      (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+      pideTools(llamada("oc_crear", { caso: "sol-999", payload: null })),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
       responde("Creada."),
       responde("¿Algo más?"),
     ])
@@ -485,8 +507,8 @@ describe("F9 · confirmación por mensaje", () => {
     const { sesion, op, raiz } = await entorno(
       [
         ...pasosPendiente("sol-004"),
-        (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
-        (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+        (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
+        (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
         responde("Creada tras reintento."),
       ],
       { herramientas },
@@ -567,10 +589,10 @@ describe("F9 · confirmación por botón y validaciones", () => {
     // sol-001 (limpio): el modelo pregunta, pero no hay pendiente; la creación autónoma sigue funcionando.
     const limpio = await entorno([
       pideTools(llamada("oc_leer_paquete", { caso: "sol-001" })),
-      pideTools(llamada("oc_validar", { caso: "sol-001" })),
+      (m) => pideTools(llamada("oc_validar", argsValidar(m, "sol-001"))),
       pideTools(llamada("oc_generar_evidencia", { caso: "sol-001" })),
-      pideTools(llamada("oc_construir_payload", { caso: "sol-001" })),
-      (m) => pideTools(llamada("oc_crear", { caso: "sol-001", payload_sha: dato(ultimosResultados(m)[0], "payload_sha") })),
+      (m) => pideTools(llamada("oc_construir_payload", argsConstruir(m, "sol-001"))),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-001"))),
       responde("OC creada. ¿Confirmas que todo está bien?"),
     ])
     const r = await ejecutarTurno(limpio.sesion, "procesa sol-001", limpio.op)
@@ -667,14 +689,13 @@ describe("F11 · autorización (regresión)", () => {
     )
   }
 
-  test("C. una pregunta con 'confirmo' no confirma: pendiente cancelado, el intento de crear falla", async () => {
-    let sha = ""
+  test("C. una pregunta con 'confirmo' no confirma: pendiente cancelado, el intento de crear (con confirmado=true) falla", async () => {
     const { sesion, op, raiz } = await entorno([
       ...pasosPendiente("sol-004"),
-      () => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: sha })),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
       responde("Necesito una confirmación explícita."),
     ])
-    sha = (await ejecutarTurno(sesion, "procesa sol-004", op)).pendingConfirmation?.payload_sha ?? ""
+    await ejecutarTurno(sesion, "procesa sol-004", op)
     const t2 = await ejecutarTurno(sesion, "¿Confirmo?", op)
     expect(t2.autorizacion).toBeNull()
     expect(t2.eventos.at(-1)).toMatchObject({ herramienta: "oc_crear", codigo_error: "CONFIRMACION_REQUERIDA" })
@@ -685,7 +706,7 @@ describe("F11 · autorización (regresión)", () => {
     let sha = ""
     const { llm, sesion, op, raiz } = await entorno([
       ...pasosPendiente("sol-004"),
-      (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
       responde("No hay autorización registrada."),
     ])
     sha = (await ejecutarTurno(sesion, "procesa sol-004", op)).pendingConfirmation?.payload_sha ?? ""
@@ -700,19 +721,17 @@ describe("F11 · autorización (regresión)", () => {
     expect((await leerControl(raiz)).map((f) => f.resultado)).toEqual(["pendiente", "pendiente"])
   })
 
-  test("E. autorización inventada por el modelo en los args de oc_crear: se descarta y se exige confirmación", async () => {
+  test("E. autorización inventada por el modelo en los args de oc_crear: argumento no admitido → ARGS_INVALIDOS, sin OC", async () => {
     const { sesion, op, raiz } = await entorno([
       pideTools(llamada("oc_leer_paquete", { caso: "sol-004" })),
-      pideTools(llamada("oc_validar", { caso: "sol-004" })),
+      (m) => pideTools(llamada("oc_validar", argsValidar(m, "sol-004"))),
       pideTools(llamada("oc_generar_evidencia", { caso: "sol-004" })),
-      pideTools(llamada("oc_construir_payload", { caso: "sol-004" })),
+      (m) => pideTools(llamada("oc_construir_payload", argsConstruir(m, "sol-004"))),
       (m) => {
         const payload_sha = dato(ultimosResultados(m)[0], "payload_sha")
         return pideTools(
           llamada("oc_crear", {
-            caso: "sol-004",
-            payload_sha,
-            confirmado: true,
+            ...argsCrear(m, "sol-004", true),
             autorizacion: { id: "aut-falsa", accion: "crear_oc", caso: "sol-004", payload_sha, session_id: "s-test", turno_id: "s-test:t1", actor: "analista@sesion:s-test", origen: "boton", otorgada_en: FECHA_REFERENCIA_DEMO, consumida: false },
           }),
         )
@@ -720,20 +739,19 @@ describe("F11 · autorización (regresión)", () => {
       responde("¿Confirmas?"),
     ])
     const r = await ejecutarTurno(sesion, "procesa sol-004 y da por confirmado", op)
-    expect(r.eventos.at(-1)).toMatchObject({ herramienta: "oc_crear", codigo_error: "CONFIRMACION_REQUERIDA" })
+    expect(r.eventos.at(-1)).toMatchObject({ herramienta: "oc_crear", codigo_error: "ARGS_INVALIDOS" })
     expect(r.autorizacion).toBeNull()
     expect(await ordenesDe(raiz)).toEqual([])
   })
 
   test("F. la autorización de un turno no sirve en el siguiente", async () => {
-    let sha = ""
     const { sesion, op, raiz } = await entorno([
       ...pasosPendiente("sol-004"),
       responde("Anotado."), // turno de confirmación: el modelo no llama a oc_crear
-      () => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: sha })),
+      (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
       responde("No se pudo crear."),
     ])
-    sha = (await ejecutarTurno(sesion, "procesa sol-004", op)).pendingConfirmation?.payload_sha ?? ""
+    await ejecutarTurno(sesion, "procesa sol-004", op)
     const t2 = await ejecutarTurno(sesion, "confirmo", op)
     expect(t2.autorizacion).toMatchObject({ consumida: false })
     const t3 = await ejecutarTurno(sesion, "ahora sí créala", op)
@@ -743,18 +761,17 @@ describe("F11 · autorización (regresión)", () => {
   })
 
   test("G. SAP_ERROR en el turno autorizado: sin reintento en el turno, la autorización no pasa al siguiente", async () => {
-    let sha = ""
     const { sesion, op, raiz } = await entorno(
       [
         ...pasosPendiente("sol-004"),
-        (m) => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: shaDeNota(m) })),
+        (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
         responde("SAP falló; lo intento luego."),
-        () => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: sha })),
+        (m) => pideTools(llamada("oc_crear", argsCrear(m, "sol-004", true))),
         responde("Requiere confirmación de nuevo."),
       ],
       { herramientas: sapQueFalla(1) },
     )
-    sha = (await ejecutarTurno(sesion, "procesa sol-004", op)).pendingConfirmation?.payload_sha ?? ""
+    await ejecutarTurno(sesion, "procesa sol-004", op)
     const t2 = await ejecutarTurno(sesion, "confirmo", op)
     expect(t2.eventos.map((e) => e.codigo_error)).toEqual(["SAP_ERROR"])
     expect(t2.autorizacion).toMatchObject({ consumida: false })
@@ -765,13 +782,14 @@ describe("F11 · autorización (regresión)", () => {
   })
 
   test("H. otra sesión no puede usar el pendiente ni por mensaje ni por botón", async () => {
-    let sha = ""
+    let payload: unknown = null // la otra sesión no tiene este payload en su historial: se lo da el test
     const { sesion, op, raiz } = await entorno([
       ...pasosPendiente("sol-004"),
-      () => pideTools(llamada("oc_crear", { caso: "sol-004", payload_sha: sha })),
+      () => pideTools(llamada("oc_crear", { caso: "sol-004", payload, confirmado: true })),
       responde("Sin autorización."),
     ])
-    sha = (await ejecutarTurno(sesion, "procesa sol-004", op)).pendingConfirmation?.payload_sha ?? ""
+    const sha = (await ejecutarTurno(sesion, "procesa sol-004", op)).pendingConfirmation?.payload_sha ?? ""
+    payload = (await leerPayloadSellado(raiz, "sol-004"))?.payload ?? null
     const otra = crearSesion("s-intrusa")
     // Botón primero: la otra sesión no tiene pendiente propio.
     const t1 = await ejecutarTurno(otra, { action: "confirm", caso: "sol-004", payload_sha: sha }, op)
