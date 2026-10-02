@@ -6,7 +6,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
-    "demo": "bun run demo.ts"
+    "demo": "bun run demo.ts",
+    "dev": "bun --watch src/server.ts",
+    "start": "bun run src/server.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agente de Órdenes de Compra</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="cabecera">
+      <div class="marca">
+        <span class="producto">Reto 03 · Automatización de compras con IA</span>
+        <h1>Agente de Órdenes de Compra</h1>
+      </div>
+      <div class="estado-sistema">
+        <span id="llm" class="pastilla" title="Estado del proveedor LLM">LLM ○ comprobando…</span>
+        <span id="sesion" class="pastilla tenue" title="Identificador de sesión del navegador (no es una identidad verificada)">Sesión —</span>
+        <button id="nueva-sesion" class="enlace" type="button">Nueva sesión</button>
+      </div>
+    </header>
+
+    <main class="contenedor">
+      <section id="conversacion" class="conversacion" aria-live="polite" aria-label="Conversación con el agente">
+        <div class="bienvenida">
+          <p>Pide al agente que procese una solicitud de compra. Cada herramienta que usa aparece como una tarjeta; si una OC requiere confirmación humana, verás un aviso con el botón para confirmarla.</p>
+        </div>
+      </section>
+
+      <section id="banner" class="banner" hidden aria-live="assertive">
+        <div class="banner-titulo">Se requiere confirmación humana</div>
+        <dl class="banner-datos">
+          <dt>Caso</dt>
+          <dd id="banner-caso"></dd>
+          <dt>Reglas</dt>
+          <dd id="banner-reglas"></dd>
+          <dt>Payload sellado</dt>
+          <dd id="banner-sha" class="mono"></dd>
+        </dl>
+        <p class="banner-nota">Confirmar autoriza una única creación de esta OC exacta. La confirmación solo vale ahora; cualquier otro mensaje la cancela.</p>
+        <div class="banner-acciones">
+          <button id="confirmar" class="primario" type="button">Confirmar y continuar</button>
+          <button id="rechazar" class="secundario" type="button">No confirmar</button>
+        </div>
+      </section>
+
+      <div class="ejemplos" aria-label="Ejemplos rápidos">
+        <span class="tenue">Ejemplos:</span>
+        <button class="chip" type="button" data-texto="Procesa sol-001">Procesar sol-001</button>
+        <button class="chip" type="button" data-texto="Procesa sol-004">Procesar sol-004</button>
+        <button class="chip" type="button" data-texto="Procesa sol-005">Procesar sol-005</button>
+        <button class="chip" type="button" data-texto="Procesa sol-006">Procesar sol-006</button>
+      </div>
+
+      <form id="formulario" class="formulario" autocomplete="off">
+        <textarea id="entrada" rows="2" maxlength="2000" placeholder="Escribe un mensaje… (Enter para enviar, Shift+Enter para salto de línea)" aria-label="Mensaje"></textarea>
+        <button id="enviar" class="primario" type="submit">Enviar</button>
+      </form>
+      <div id="procesando" class="procesando" hidden>Procesando…</div>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
