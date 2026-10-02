@@ -11,6 +11,7 @@ import {
   ErrorPersistencia,
   appendControl,
   appendJsonl,
+  appendLog,
   escribirEjecucion,
   escribirPayloadSellado,
   leerControl,
@@ -573,6 +574,165 @@ describe("F6 · runner", () => {
   test("los nombres que ve el modelo siguen <archivo>_<export>", () => {
     const registro: HerramientasOc = crearHerramientasOc()
     expect(Object.keys(registroOc(registro)).sort()).toEqual(["oc_construir_payload", "oc_crear", "oc_generar_evidencia", "oc_leer_paquete", "oc_validar"])
+  })
+})
+
+// ===========================================================================
+// F11 · integridad, persistencia y fallos parciales
+// ===========================================================================
+
+describe("F11 · integridad de artefactos", () => {
+  test("B. contenido válido pero payload_sha declarado incorrecto → PAYLOAD_NO_COINCIDE", async () => {
+    const raiz = await raizConCasos()
+    const sha = await prepararCaso(raiz, "sol-001")
+    const ruta = join(raiz, "out", "sol-001", "payload.json")
+    await writeFile(ruta, (await readFile(ruta, "utf8")).replace(`"payload_sha": "${sha}"`, `"payload_sha": "${"e".repeat(64)}"`))
+    const e = await falla(llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))
+    expect([e.codigo, e.detalle?.["motivo"]]).toEqual(["PAYLOAD_NO_COINCIDE", "hash_almacenado_no_coincide"])
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("C. aprobacion.txt alterada o borrada tras generarse → construir la rechaza sin reconstruir", async () => {
+    const raiz = await raizConCasos()
+    await ok(DataEvidencia, llamar(raiz, "oc_generar_evidencia", { caso: "sol-001" }))
+    const ruta = join(raiz, "out", "sol-001", "aprobacion.txt")
+    await writeFile(ruta, `${await readFile(ruta, "utf8")}\nlínea añadida`)
+    expect((await falla(llamar(raiz, "oc_construir_payload", { caso: "sol-001" }))).codigo).toBe("EVIDENCIA_INCONSISTENTE")
+    await rm(ruta)
+    expect((await falla(llamar(raiz, "oc_construir_payload", { caso: "sol-001" }))).codigo).toBe("FALTA_EVIDENCIA")
+    expect(existsSync(join(raiz, "out", "sol-001", "payload.json"))).toBe(false)
+  })
+
+  test("D. trazabilidad incompatible con el payload_sha sellado → rechazo, sin sobrescribir", async () => {
+    const raiz = await raizConCasos()
+    await prepararCaso(raiz, "sol-001")
+    const ruta = join(raiz, "out", "sol-001", "trazabilidad.json")
+    const alterada = (await readFile(ruta, "utf8")).replace(/"payload_sha": "[a-f0-9]{64}"/, `"payload_sha": "${"f".repeat(64)}"`)
+    await writeFile(ruta, alterada)
+    const e = await falla(llamar(raiz, "oc_construir_payload", { caso: "sol-001" }))
+    expect([e.codigo, e.detalle?.["motivo"]]).toEqual(["PAYLOAD_NO_COINCIDE", "sello_distinto"])
+    expect(await readFile(ruta, "utf8")).toBe(alterada)
+  })
+
+  test("E. catálogo modificado entre construir y crear (IVA o pago ya no existen) → CATALOGO_INVALIDO", async () => {
+    for (const [archivo, campo] of [
+      ["indicadores-iva.json", "indicador_iva"],
+      ["condiciones-pago.json", "condiciones_pago"],
+    ] as const) {
+      const raiz = await raizConCasos()
+      const sha = await prepararCaso(raiz, "sol-001")
+      const ruta = join(raiz, "fixtures", "reto-03", "maestros", archivo)
+      const catalogo = z.array(z.object({ codigo: z.string() }).loose()).parse(JSON.parse(await readFile(ruta, "utf8")))
+      await writeFile(ruta, JSON.stringify(catalogo.filter((c) => c.codigo !== "C1" && c.codigo !== "Z030")))
+      const e = await falla(llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))
+      expect([e.codigo, e.detalle?.["campo"]]).toEqual(["CATALOGO_INVALIDO", campo])
+      expect(await ordenesDe(raiz)).toEqual([])
+    }
+  })
+})
+
+describe("F11 · SAP y persistencia", () => {
+  test("A. ordenes.jsonl corrupto → error controlado (no se ignora la línea)", async () => {
+    const raiz = await raizConCasos()
+    const sha = await prepararCaso(raiz, "sol-001")
+    await mkdir(join(raiz, "out", "sap"), { recursive: true })
+    await writeFile(join(raiz, "out", "sap", "ordenes.jsonl"), "{ esto no es json\n")
+    await expect(mock(raiz).buscarOrdenPorReferencia("SOL-2026-001")).rejects.toBeInstanceOf(ErrorPersistencia)
+    expect((await falla(llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))).codigo).toBe("SAP_ERROR")
+    expect(await readFile(join(raiz, "out", "sap", "ordenes.jsonl"), "utf8")).toBe("{ esto no es json\n")
+  })
+
+  test("B. control.csv: comas y comillas se escapan y el archivo sigue parseable; saltos de línea se rechazan", async () => {
+    const raiz = await nuevaRaiz()
+    const rara = fila('SOL,"RARA"-1', "pendiente", { confirmaciones: ["RC5", "RC8"] })
+    await appendControl(raiz, rara)
+    await appendControl(raiz, fila("SOL-2026-001", "exitoso", { numero_oc: "4500000001" }))
+    expect(await leerControl(raiz)).toEqual([rara, fila("SOL-2026-001", "exitoso", { numero_oc: "4500000001" })])
+    await expect(appendControl(raiz, fila("SOL\nINYECTADA", "pendiente"))).rejects.toBeInstanceOf(ErrorPersistencia)
+    expect(await leerControl(raiz)).toHaveLength(2)
+  })
+
+  test("C. log.jsonl con escrituras concurrentes: cada línea es JSON válido", async () => {
+    const raiz = await nuevaRaiz()
+    await Promise.all(
+      Array.from({ length: 40 }, (_, i) =>
+        appendLog(raiz, { ts: FECHA_REFERENCIA_DEMO, sesion: `s${i}`, herramienta: "oc_validar", caso: "sol-001", ok: true, resumen: `línea ${i}`, duracion_ms: i }),
+      ),
+    )
+    const lineas = (await readFile(join(raiz, "out", "log.jsonl"), "utf8")).trimEnd().split("\n")
+    expect(lineas).toHaveLength(40)
+    for (const l of lineas) expect(LineaLog.safeParse(JSON.parse(l)).success).toBe(true)
+  })
+
+  test("D. fallo parcial: SAP crea la OC y falla ejecucion.json → ERROR_ESCRITURA; el reintento recupera la misma OC", async () => {
+    const raiz = await raizConCasos()
+    const sha = await prepararCaso(raiz, "sol-001")
+    await mkdir(join(raiz, "out", "sol-001", "ejecucion.json"), { recursive: true }) // bloquea la escritura
+    const e = await falla(llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))
+    expect(e.codigo).toBe("ERROR_ESCRITURA")
+    expect(await ordenesDe(raiz)).toHaveLength(1)
+    await rm(join(raiz, "out", "sol-001", "ejecucion.json"), { recursive: true })
+    const r = await ok(DataCrear, llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))
+    expect(r).toMatchObject({ numero_oc: "4500000001", idempotente: true })
+    expect(await ordenesDe(raiz)).toHaveLength(1)
+    expect(await leerJsonOut(raiz, "sol-001/ejecucion.json", Ejecucion)).toMatchObject({ numero_oc: "4500000001", idempotente: true, autorizacion: null })
+  })
+
+  test("E. fallo parcial: SAP crea la OC y falla control.csv → ERROR_ESCRITURA; el reintento recupera la misma OC", async () => {
+    const raiz = await raizConCasos()
+    const sha = await prepararCaso(raiz, "sol-001")
+    await mkdir(join(raiz, "out", "control.csv"), { recursive: true }) // bloquea la escritura
+    const e = await falla(llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))
+    expect(e.codigo).toBe("ERROR_ESCRITURA")
+    expect(await ordenesDe(raiz)).toHaveLength(1)
+    await rm(join(raiz, "out", "control.csv"), { recursive: true })
+    const r = await ok(DataCrear, llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha }))
+    expect(r).toMatchObject({ numero_oc: "4500000001", idempotente: true })
+    expect((await leerControl(raiz)).map((f) => [f.resultado, f.numero_oc])).toEqual([["exitoso", "4500000001"]])
+  })
+
+  test("F. reinicio: un registro de tools nuevo sobre el mismo out/ recupera numeración e idempotencia", async () => {
+    const raiz = await raizConCasos()
+    const sha1 = await prepararCaso(raiz, "sol-001")
+    await ok(DataCrear, llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha1 }))
+    const reiniciado = registroOc(crearHerramientasOc())
+    expect(await ok(DataCrear, llamar(raiz, "oc_crear", { caso: "sol-001", payload_sha: sha1 }, {}, reiniciado))).toMatchObject({ numero_oc: "4500000001", idempotente: true })
+    const sha4 = await prepararCaso(raiz, "sol-004")
+    const r4 = await ok(DataCrear, llamar(raiz, "oc_crear", { caso: "sol-004", payload_sha: sha4 }, { autorizacion: autorizacion("sol-004", sha4) }, reiniciado))
+    expect(r4.numero_oc).toBe("4500000002")
+  })
+})
+
+describe("F11 · tools y runner", () => {
+  test("A. argumentos adicionales se descartan sin efecto (no pueden inyectar datos ni autorizaciones)", async () => {
+    const raiz = await raizConCasos()
+    const v = await ok(DataValidar, llamar(raiz, "oc_validar", { caso: "sol-001", apta: true, extra: "x" }))
+    expect(v.apta).toBe(true)
+    const sha = await prepararCaso(raiz, "sol-004")
+    const e = await falla(
+      llamar(raiz, "oc_crear", { caso: "sol-004", payload_sha: sha, confirmado: true, autorizacion: autorizacion("sol-004", sha), payload: { precio: 1 } }),
+    )
+    expect(e.codigo).toBe("CONFIRMACION_REQUERIDA")
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("B/C. oc_crear sin payload_sha: caso limpio → ARGS_INVALIDOS; caso bloqueado → CASO_BLOQUEADO", async () => {
+    const raiz = await raizConCasos()
+    await prepararCaso(raiz, "sol-001")
+    expect((await falla(llamar(raiz, "oc_crear", { caso: "sol-001" }))).codigo).toBe("ARGS_INVALIDOS")
+    expect((await falla(llamar(raiz, "oc_crear", { caso: "sol-002" }))).codigo).toBe("CASO_BLOQUEADO")
+    expect(await ordenesDe(raiz)).toEqual([])
+  })
+
+  test("D/E. autorización con acción incorrecta o de otra sesión → AUTORIZACION_INVALIDA", async () => {
+    const raiz = await raizConCasos()
+    const sha = await prepararCaso(raiz, "sol-004")
+    const accionMala = { ...autorizacion("sol-004", sha), accion: "borrar_oc" } as unknown as Autorizacion
+    const e1 = await falla(llamar(raiz, "oc_crear", { caso: "sol-004", payload_sha: sha }, { autorizacion: accionMala }))
+    expect([e1.codigo, e1.detalle?.["motivo"]]).toEqual(["AUTORIZACION_INVALIDA", "estructura_invalida"])
+    const e2 = await falla(llamar(raiz, "oc_crear", { caso: "sol-004", payload_sha: sha }, { autorizacion: autorizacion("sol-004", sha, { session_id: "intruso" }) }))
+    expect([e2.codigo, e2.detalle?.["motivo"]]).toEqual(["AUTORIZACION_INVALIDA", "session_id"])
+    expect(await ordenesDe(raiz)).toEqual([])
   })
 })
 

@@ -77,23 +77,36 @@ function esNoEncontrado(e: unknown): boolean {
 // Primitivas
 // ---------------------------------------------------------------------------
 
+// Un fallo de escritura del sistema de archivos se reporta como ErrorPersistencia (ruta relativa,
+// sin detalles del SO), para que las tools lo traten como ERROR_ESCRITURA y no como error interno.
+async function escribiendo<T>(relativa: string, accion: () => Promise<T>): Promise<T> {
+  try {
+    return await accion()
+  } catch (e) {
+    if (e instanceof ErrorPersistencia) throw e
+    throw new ErrorPersistencia(`no se pudo escribir out/${relativa}`)
+  }
+}
+
 export async function escribirAtomico(raiz: string, relativa: string, contenido: string): Promise<string> {
   const destino = rutaEnOut(raiz, relativa)
-  await mkdir(dirname(destino), { recursive: true })
   const temporal = join(dirname(destino), `.${basename(destino)}.${randomUUID()}.tmp`)
-  try {
-    const archivo = await open(temporal, "w")
+  await escribiendo(relativa, async () => {
+    await mkdir(dirname(destino), { recursive: true })
     try {
-      await archivo.writeFile(contenido, "utf8")
-      await archivo.sync()
-    } finally {
-      await archivo.close()
+      const archivo = await open(temporal, "w")
+      try {
+        await archivo.writeFile(contenido, "utf8")
+        await archivo.sync()
+      } finally {
+        await archivo.close()
+      }
+      await rename(temporal, destino)
+    } catch (e) {
+      await rm(temporal, { force: true })
+      throw e
     }
-    await rename(temporal, destino)
-  } catch (e) {
-    await rm(temporal, { force: true })
-    throw e
-  }
+  })
   return rutaPublica(relativa)
 }
 
@@ -133,10 +146,12 @@ function validar<T>(esquema: ZodType<T>, valor: unknown, que: string): T {
 // Una línea completa por llamada, bajo el candado del archivo.
 export async function appendJsonl(raiz: string, relativa: string, valor: unknown): Promise<string> {
   const destino = rutaEnOut(raiz, relativa)
-  await conCandado(destino, async () => {
-    await mkdir(dirname(destino), { recursive: true })
-    await appendFile(destino, `${JSON.stringify(valor)}\n`, "utf8")
-  })
+  await conCandado(destino, () =>
+    escribiendo(relativa, async () => {
+      await mkdir(dirname(destino), { recursive: true })
+      await appendFile(destino, `${JSON.stringify(valor)}\n`, "utf8")
+    }),
+  )
   return rutaPublica(relativa)
 }
 
@@ -295,18 +310,20 @@ function parsearLineaCsv(linea: string): string[] {
 export async function appendControl(raiz: string, fila: FilaControl): Promise<string> {
   const valida = validar(FilaControl, fila, "fila de control")
   const destino = rutaEnOut(raiz, ARCHIVOS.control)
-  await conCandado(destino, async () => {
-    await mkdir(dirname(destino), { recursive: true })
-    const tamano = await stat(destino).then(
-      (s) => s.size,
-      (e: unknown) => {
-        if (esNoEncontrado(e)) return 0
-        throw e
-      },
-    )
-    const encabezado = tamano === 0 ? `${ENCABEZADO_CONTROL}\n` : ""
-    await appendFile(destino, `${encabezado}${filaCsv(valida)}\n`, "utf8")
-  })
+  await conCandado(destino, () =>
+    escribiendo(ARCHIVOS.control, async () => {
+      await mkdir(dirname(destino), { recursive: true })
+      const tamano = await stat(destino).then(
+        (s) => s.size,
+        (e: unknown) => {
+          if (esNoEncontrado(e)) return 0
+          throw e
+        },
+      )
+      const encabezado = tamano === 0 ? `${ENCABEZADO_CONTROL}\n` : ""
+      await appendFile(destino, `${encabezado}${filaCsv(valida)}\n`, "utf8")
+    }),
+  )
   return rutaPublica(ARCHIVOS.control)
 }
 

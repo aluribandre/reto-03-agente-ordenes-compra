@@ -236,6 +236,62 @@ describe("sintéticos de evidencia y payload", () => {
   })
 })
 
+describe("F11 · caminos de error y bordes", () => {
+  test("A. moneda no soportada → MONEDA_NO_SOPORTADA", () => {
+    const e = error(construir("sol-001", (p) => (p.solicitud.moneda = "EUR")))
+    expect(e).toMatchObject({ codigo: "MONEDA_NO_SOPORTADA", detalle: { campo: "moneda", valor: "EUR" } })
+  })
+
+  test("B. evaluación apta que no corresponde al paquete → PAYLOAD_INVALIDO (evaluacion_inconsistente)", () => {
+    const sol001 = obtener(paquetes, "sol-001")
+    const r = construirPayload({
+      paquete: obtener(paquetes, "sol-002"),
+      maestros,
+      evaluacion: evaluarControles(sol001, maestros),
+      evidenciaSha256: construirEvidencia(obtener(aprobaciones, "sol-002")).sha256,
+      generadoEn: FECHA_REFERENCIA_DEMO,
+    })
+    expect(error(r)).toMatchObject({ codigo: "PAYLOAD_INVALIDO", detalle: { motivo: "evaluacion_inconsistente" } })
+  })
+
+  test("C. descripción solo con espacios (válida en la solicitud) → la OC no pasa su esquema → PAYLOAD_INVALIDO", () => {
+    const e = error(construir("sol-001", (p) => (p.solicitud.descripcion = "   ")))
+    expect(e.codigo).toBe("PAYLOAD_INVALIDO")
+    expect(e.detalle?.["campos"]).toEqual(["posiciones.0.descripcion"])
+  })
+
+  test("D/E. descripción de 40 caracteres no cambia; de 41 o más se trunca a ≤ 40", () => {
+    const cuarenta = "abcdefghij abcdefghij abcdefghij abcdefg"
+    expect(cuarenta).toHaveLength(40)
+    expect(truncarDescripcion(cuarenta)).toBe(cuarenta)
+    const cuarentaYUno = `${cuarenta}h`
+    expect(truncarDescripcion(cuarentaYUno).length).toBeLessThanOrEqual(40)
+    expect(truncarDescripcion(cuarentaYUno)).toBe("abcdefghij abcdefghij abcdefghij")
+    const r = ok(construir("sol-001", (p) => (p.solicitud.descripcion = cuarenta)))
+    expect(r.orden.posiciones[0]?.descripcion).toBe(cuarenta)
+  })
+
+  test("F. Unicode: el hash canónico es determinista e independiente del orden de claves", () => {
+    const a = { nombre: "Papelería Ñandú — café", nota: "año 2026 · 🙂", n: 1 }
+    const b = { n: 1, nota: "año 2026 · 🙂", nombre: "Papelería Ñandú — café" }
+    expect(jsonCanonico(a)).toBe(jsonCanonico(b))
+    expect(sha256Hex(jsonCanonico(a))).toBe(sha256Hex(jsonCanonico(b)))
+    // La forma NFC/NFD sí cambia el hash: por eso la ingestión normaliza todo a NFC antes de sellar.
+    expect(sha256Hex(jsonCanonico({ s: "é" }))).not.toBe(sha256Hex(jsonCanonico({ s: "é" })))
+  })
+
+  test("G. -0 se serializa como 0; NaN/Infinity se rechazan (esquema y JSON canónico)", () => {
+    expect(jsonCanonico({ v: -0 })).toBe(jsonCanonico({ v: 0 }))
+    expect(() => jsonCanonico({ v: Number.NaN })).toThrow(TypeError)
+    expect(() => jsonCanonico({ v: Number.POSITIVE_INFINITY })).toThrow(TypeError)
+    const base = ok(construir("sol-001")).orden
+    for (const malo of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const variante = { ...base, posiciones: base.posiciones.map((x) => ({ ...x, precio_unitario: malo })) }
+      expect(OrdenCompra.safeParse(variante).success).toBe(false)
+    }
+  })
+})
+
 describe("invariantes", () => {
   test("fixtures/ intacto y sin escrituras en out/", async () => {
     expect(await huellaArbol(FIXTURES_REALES)).toBe(huellaInicialFixtures)

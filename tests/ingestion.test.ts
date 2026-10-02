@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { readFile } from "node:fs/promises"
+import { readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { RAIZ_PROYECTO } from "../src/config"
 import { fechaDe, normalizarEmail, normalizarNit, normalizarNombre, normalizarTexto, sumarDias } from "../src/domain/normalizar"
@@ -234,6 +234,71 @@ describe("sintéticos de ingestión", () => {
       await t.limpiar()
     }
   })
+
+  // F11: códigos de ingestión que faltaba cubrir.
+  async function conRaiz(casos: string[], fn: (t: Awaited<ReturnType<typeof crearRaizTemporal>>) => Promise<void>): Promise<void> {
+    const t = await crearRaizTemporal(casos)
+    try {
+      await fn(t)
+    } finally {
+      await t.limpiar()
+    }
+  }
+
+  test("F11-A. solicitud ausente → SOLICITUD_FALTANTE", () =>
+    conRaiz(["sol-001"], async (t) => {
+      await t.borrar("sol-001", "solicitud.json")
+      expect((await cargarError("sol-001", t.raiz)).codigo).toBe("SOLICITUD_FALTANTE")
+    }))
+
+  test("F11-B. correo ausente → CORREO_FALTANTE", () =>
+    conRaiz(["sol-001"], async (t) => {
+      await t.borrar("sol-001", "correo.json")
+      expect((await cargarError("sol-001", t.raiz)).codigo).toBe("CORREO_FALTANTE")
+    }))
+
+  test("F11-C. solicitud con JSON válido pero esquema inválido → SOLICITUD_INVALIDA", () =>
+    conRaiz(["sol-001"], async (t) => {
+      const original = await t.leer("sol-001", "solicitud.json")
+      const sinCentro = original.replace(/\s*"centro_costo": "CC-1010",/, "")
+      expect(sinCentro).not.toBe(original)
+      await t.escribir("sol-001", "solicitud.json", sinCentro)
+      const e = await cargarError("sol-001", t.raiz)
+      expect(e.codigo).toBe("SOLICITUD_INVALIDA")
+      expect(e.detalle?.["campos"]).toEqual(["centro_costo"])
+    }))
+
+  test("F11-D. maestro malformado o con estructura inválida → MAESTRO_INVALIDO", () =>
+    conRaiz(["sol-001"], async (t) => {
+      const ruta = join(t.raiz, "fixtures", "reto-03", "maestros", "proveedores.json")
+      await writeFile(ruta, "{ roto")
+      const malformado = await cargarMaestros({ raiz: t.raiz })
+      expect(malformado.ok ? null : malformado.error.codigo).toBe("MAESTRO_INVALIDO")
+      await writeFile(ruta, JSON.stringify([{ nit: 1, activo: "sí" }]))
+      const estructura = await cargarMaestros({ raiz: t.raiz })
+      expect(estructura.ok ? null : estructura.error.codigo).toBe("MAESTRO_INVALIDO")
+    }))
+
+  test("F11-E. factura presente pero ilegible → INSUMO_ILEGIBLE", () =>
+    conRaiz(["sol-005"], async (t) => {
+      await t.escribir("sol-005", "factura.txt", "documento sin número, fecha ni total")
+      const e = await cargarError("sol-005", t.raiz)
+      expect([e.codigo, e.detalle?.["archivo"]]).toEqual(["INSUMO_ILEGIBLE", "solicitudes/sol-005/factura.txt"])
+    }))
+
+  test("F11-F. aprobación presente con estructura ilegible → INSUMO_ILEGIBLE (JSON roto → JSON_MALFORMADO)", () =>
+    conRaiz(["sol-001"], async (t) => {
+      await t.escribir("sol-001", "aprobacion.json", JSON.stringify({ de: "mlopez@periferia-ficticia.com" }))
+      expect((await cargarError("sol-001", t.raiz)).codigo).toBe("INSUMO_ILEGIBLE")
+      await t.escribir("sol-001", "aprobacion.json", "{ roto")
+      expect((await cargarError("sol-001", t.raiz)).codigo).toBe("JSON_MALFORMADO")
+    }))
+
+  test("F11-G. correo presente con estructura ilegible → INSUMO_ILEGIBLE", () =>
+    conRaiz(["sol-001"], async (t) => {
+      await t.escribir("sol-001", "correo.json", JSON.stringify({ id: "x" }))
+      expect((await cargarError("sol-001", t.raiz)).codigo).toBe("INSUMO_ILEGIBLE")
+    }))
 
   test("E. path traversal y casos inválidos → CASO_INVALIDO", async () => {
     const intentos = ["../algo", "..", "../maestros", "sol-001/../../x", "sol-001\\..\\..", "/etc/passwd", "C:\\Windows", "SOL-001", ""]

@@ -179,6 +179,67 @@ describe("sintéticos de controles", () => {
     expect(reglas(e.bloqueos)).toEqual(["RC1"])
   })
 
+  // F11: bordes. sol-001 vale 11.400.000 → el 2 % es exactamente 228.000.
+  test("F11-A/B/C. RC5: ±2 % exacto → CUMPLE; +1 unidad por encima → CONFIRMACION", () => {
+    const conCotizacion = (total: number) =>
+      control(
+        evaluar(
+          variante(paquete("sol-001"), (p) => {
+            if (p.cotizacion) p.cotizacion.total = total
+          }),
+        ),
+        "RC5",
+      ).estado
+    expect(conCotizacion(11_628_000)).toBe("CUMPLE")
+    expect(conCotizacion(11_172_000)).toBe("CUMPLE")
+    expect(conCotizacion(11_628_001)).toBe("CONFIRMACION")
+    expect(conCotizacion(11_171_999)).toBe("CONFIRMACION")
+  })
+
+  test("F11-D. cotización ausente → RC5 CONFIRMACION (sin_cotizacion)", () => {
+    const e = evaluar(variante(paquete("sol-001"), (p) => (p.cotizacion = null)))
+    expect(control(e, "RC5")).toMatchObject({ estado: "CONFIRMACION", motivo: "sin_cotizacion" })
+    expect(e.apta).toBe(true)
+  })
+
+  test("F11-E/F. sin IVA ni pago y proveedor no resuelto → RC6 y RC7 NO_EVALUABLE dependientes de RC1", () => {
+    const e = evaluar(
+      variante(paquete("sol-001"), (p) => {
+        p.solicitud.proveedor_nit = "901999000"
+        delete p.solicitud.indicador_iva
+        delete p.solicitud.condiciones_pago
+      }),
+    )
+    expect(control(e, "RC1").estado).toBe("BLOQUEO")
+    expect(control(e, "RC6")).toMatchObject({ estado: "NO_EVALUABLE", depende_de: "RC1" })
+    expect(control(e, "RC7")).toMatchObject({ estado: "NO_EVALUABLE", depende_de: "RC1" })
+    expect(reglas(e.bloqueos)).toEqual(["RC1"])
+    expect(e.derivados).toEqual({})
+  })
+
+  test("F11-G. factura con la misma fecha que la solicitud → no retroactiva", () => {
+    const e = evaluar(
+      variante(paquete("sol-005"), (p) => {
+        if (p.factura) p.factura.fecha = p.solicitud.fecha_solicitud
+      }),
+    )
+    expect(control(e, "RC8").estado).toBe("CUMPLE")
+    expect(e.retroactiva).toBe(false)
+  })
+
+  test("F11-H. RC3 exactamente en el tope del aprobador → CUMPLE", () => {
+    const e = evaluar(
+      variante(paquete("sol-001"), (p) => {
+        p.solicitud.cantidad = 1
+        p.solicitud.valor_unitario = 50_000_000
+        p.solicitud.valor_total = 50_000_000
+        if (p.cotizacion) p.cotizacion.total = 50_000_000
+      }),
+    )
+    expect(control(e, "RC3")).toMatchObject({ estado: "CUMPLE", valores_comparados: { tope_aplicado: 50_000_000 } })
+    expect(e.apta).toBe(true)
+  })
+
   test("5. aprobación ausente → RC2 BLOQUEO; RC3 y RC9 NO_EVALUABLE dependientes de RC2", () => {
     const e = evaluar(variante(paquete("sol-001"), (p) => (p.aprobacion = null)))
     expect(control(e, "RC2")).toMatchObject({ estado: "BLOQUEO", motivo: "sin_aprobacion" })
