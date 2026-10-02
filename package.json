@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "bun test"
+    "test": "bun test",
+    "demo": "bun run demo.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"
