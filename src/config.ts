@@ -23,8 +23,11 @@ export function crearReloj(fechaReferencia?: string): Reloj {
 const EsquemaEntorno = z.object({
   FECHA_REFERENCIA: FechaHora.optional(),
   LLM_PROVIDER: z.enum(["anthropic"]).default("anthropic"),
-  LLM_MODEL: z.string().min(1).optional(),
+  LLM_MODEL: z.string().min(1).default("claude-opus-5-5"),
   LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  LLM_MAX_TOKENS: z.coerce.number().int().positive().default(16_000),
+  LLM_EFFORT: z.enum(["low", "medium", "high", "xhigh", "max"]).default("medium"),
+  LLM_MAX_REINTENTOS: z.coerce.number().int().min(0).max(5).default(1),
   MAX_ITERACIONES: z.coerce.number().int().positive().default(25),
   MAX_TOKENS_SESION: z.coerce.number().int().positive().default(200_000),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -34,7 +37,14 @@ export type Config = {
   raiz: string
   reloj: Reloj
   fechaReferencia: string | null
-  llm: { proveedor: "anthropic"; modelo: string | null; timeoutMs: number }
+  llm: {
+    proveedor: "anthropic"
+    modelo: string
+    timeoutMs: number
+    maxTokens: number
+    esfuerzo: "low" | "medium" | "high" | "xhigh" | "max"
+    maxReintentos: number
+  }
   limites: { maxIteraciones: number; maxTokensSesion: number }
   puerto: number
 }
@@ -58,7 +68,14 @@ export function cargarConfig(env: Record<string, string | undefined> = process.e
     raiz: RAIZ_PROYECTO,
     reloj: crearReloj(e.FECHA_REFERENCIA),
     fechaReferencia: e.FECHA_REFERENCIA ?? null,
-    llm: { proveedor: e.LLM_PROVIDER, modelo: e.LLM_MODEL ?? null, timeoutMs: e.LLM_TIMEOUT_MS },
+    llm: {
+      proveedor: e.LLM_PROVIDER,
+      modelo: e.LLM_MODEL,
+      timeoutMs: e.LLM_TIMEOUT_MS,
+      maxTokens: e.LLM_MAX_TOKENS,
+      esfuerzo: e.LLM_EFFORT,
+      maxReintentos: e.LLM_MAX_REINTENTOS,
+    },
     limites: { maxIteraciones: e.MAX_ITERACIONES, maxTokensSesion: e.MAX_TOKENS_SESION },
     puerto: e.PORT,
   }

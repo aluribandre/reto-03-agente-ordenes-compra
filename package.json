@@ -9,6 +9,7 @@
     "demo": "bun run demo.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
