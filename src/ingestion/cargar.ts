@@ -5,6 +5,7 @@ import { readdir, readFile, stat } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import type { ZodError } from "zod"
 import { RAIZ_PROYECTO } from "../config"
+import type { DatosEvidencia } from "../domain/evidencia"
 import { normalizarEmail, normalizarTexto } from "../domain/normalizar"
 import {
   AprobacionFixture,
@@ -273,6 +274,34 @@ export async function cargarCaso(caso: unknown, opciones: OpcionesCarga = {}): P
     })
     if (!paquete.success) return { ok: false, error: ERROR_INTERNO }
     return { ok: true, data: paquete.data }
+  } catch (e) {
+    return comoError(e)
+  }
+}
+
+// Campos de aprobacion.json que necesita la evidencia (PRD 7.1: de, para, fecha, asunto, cuerpo).
+// null si el caso no trae aprobación. Sin nota_fixture, sin cc, sin rutas, sin lógica de negocio.
+export async function cargarAprobacionFuente(caso: unknown, opciones: OpcionesCarga = {}): Promise<ResultadoTool<DatosEvidencia | null>> {
+  try {
+    const valido = Caso.safeParse(caso)
+    if (!valido.success) {
+      fallar("CASO_INVALIDO", "El identificador de caso no es válido.", "Usar el nombre de la carpeta del caso, p. ej. sol-004.")
+    }
+    const nombre = valido.data
+    const dir = await resolverDirCaso(opciones.raiz ?? RAIZ_PROYECTO, nombre)
+    const { archivo } = EQUIVALENCIAS.aprobacion
+    const rel = `solicitudes/${nombre}/${archivo}`
+    const texto = await leerSiExiste(join(dir, archivo))
+    if (texto === null) return { ok: true, data: null }
+    const r = AprobacionFixture.safeParse(parsearJson(texto, rel))
+    if (!r.success) {
+      fallar("INSUMO_ILEGIBLE", `${rel} no tiene la estructura de aprobación esperada.`, "Pedir el reenvío del correo de aprobación del líder.", {
+        archivo: rel,
+        campos: camposConError(r.error),
+      })
+    }
+    const { de, para, fecha, asunto, cuerpo } = r.data
+    return { ok: true, data: { de, para, fecha, asunto, cuerpo } }
   } catch (e) {
     return comoError(e)
   }

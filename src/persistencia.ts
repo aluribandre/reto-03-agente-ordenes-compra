@@ -159,11 +159,70 @@ export async function leerJsonl<T>(raiz: string, relativa: string, esquema: ZodT
 }
 
 // ---------------------------------------------------------------------------
-// Artefactos por caso: out/<caso>/...
+// Artefactos sellados por caso: out/<caso>/... (WRITE-ONCE)
+// Inexistente → se escribe. Mismo sello → se reutiliza sin reescribir.
+// Sello distinto (o archivo ilegible) → conflicto: nunca se sobrescribe.
 // ---------------------------------------------------------------------------
 
+export type ResultadoSellado =
+  | { estado: "escrito" | "reutilizado"; ruta: string }
+  | { estado: "conflicto"; ruta: string; detalle: Record<string, string> }
+
+async function sellarJson<T extends { payload_sha: string }>(
+  raiz: string,
+  relativa: string,
+  esquema: ZodType<T>,
+  valor: T,
+): Promise<ResultadoSellado> {
+  const nuevo = validar(esquema, valor, `out/${relativa}`)
+  const destino = rutaEnOut(raiz, relativa)
+  return conCandado(`sello:${destino}`, async (): Promise<ResultadoSellado> => {
+    let existente: T | null
+    try {
+      existente = await leerJson(raiz, relativa, esquema)
+    } catch {
+      return { estado: "conflicto", ruta: rutaPublica(relativa), detalle: { motivo: "archivo_sellado_ilegible" } }
+    }
+    if (existente === null) return { estado: "escrito", ruta: await escribirJson(raiz, relativa, nuevo) }
+    if (existente.payload_sha === nuevo.payload_sha) return { estado: "reutilizado", ruta: rutaPublica(relativa) }
+    return {
+      estado: "conflicto",
+      ruta: rutaPublica(relativa),
+      detalle: { motivo: "sello_distinto", payload_sha_sellado: existente.payload_sha, payload_sha_nuevo: nuevo.payload_sha },
+    }
+  })
+}
+
+async function sellarTexto(raiz: string, relativa: string, contenido: string): Promise<ResultadoSellado> {
+  const destino = rutaEnOut(raiz, relativa)
+  return conCandado(`sello:${destino}`, async (): Promise<ResultadoSellado> => {
+    const existente = await leerTextoOut(raiz, relativa)
+    if (existente === null) return { estado: "escrito", ruta: await escribirAtomico(raiz, relativa, contenido) }
+    if (existente === contenido) return { estado: "reutilizado", ruta: rutaPublica(relativa) }
+    return { estado: "conflicto", ruta: rutaPublica(relativa), detalle: { motivo: "contenido_distinto" } }
+  })
+}
+
+function exigirSinConflicto(r: ResultadoSellado): string {
+  if (r.estado === "conflicto") throw new ErrorPersistencia(`${r.ruta} ya está sellado con otro contenido`)
+  return r.ruta
+}
+
+export async function sellarPayload(raiz: string, caso: string, sellado: PayloadSellado): Promise<ResultadoSellado> {
+  return sellarJson(raiz, relativaCaso(caso, ARCHIVOS.payload), PayloadSellado, sellado)
+}
+
+export async function sellarTrazabilidad(raiz: string, caso: string, trazabilidad: Trazabilidad): Promise<ResultadoSellado> {
+  return sellarJson(raiz, relativaCaso(caso, ARCHIVOS.trazabilidad), Trazabilidad, trazabilidad)
+}
+
+export async function sellarEvidencia(raiz: string, caso: string, texto: string): Promise<ResultadoSellado> {
+  return sellarTexto(raiz, relativaCaso(caso, ARCHIVOS.evidencia), texto)
+}
+
+// Variantes que lanzan ErrorPersistencia ante conflicto (no existe ningún camino de sobrescritura).
 export async function escribirPayloadSellado(raiz: string, caso: string, sellado: PayloadSellado): Promise<string> {
-  return escribirJson(raiz, relativaCaso(caso, ARCHIVOS.payload), validar(PayloadSellado, sellado, "payload sellado"))
+  return exigirSinConflicto(await sellarPayload(raiz, caso, sellado))
 }
 
 export async function leerPayloadSellado(raiz: string, caso: string): Promise<PayloadSellado | null> {
@@ -171,7 +230,7 @@ export async function leerPayloadSellado(raiz: string, caso: string): Promise<Pa
 }
 
 export async function escribirTrazabilidad(raiz: string, caso: string, trazabilidad: Trazabilidad): Promise<string> {
-  return escribirJson(raiz, relativaCaso(caso, ARCHIVOS.trazabilidad), validar(Trazabilidad, trazabilidad, "trazabilidad"))
+  return exigirSinConflicto(await sellarTrazabilidad(raiz, caso, trazabilidad))
 }
 
 export async function leerTrazabilidad(raiz: string, caso: string): Promise<Trazabilidad | null> {
@@ -179,7 +238,7 @@ export async function leerTrazabilidad(raiz: string, caso: string): Promise<Traz
 }
 
 export async function escribirEvidencia(raiz: string, caso: string, texto: string): Promise<string> {
-  return escribirAtomico(raiz, relativaCaso(caso, ARCHIVOS.evidencia), texto)
+  return exigirSinConflicto(await sellarEvidencia(raiz, caso, texto))
 }
 
 export async function leerEvidencia(raiz: string, caso: string): Promise<string | null> {
