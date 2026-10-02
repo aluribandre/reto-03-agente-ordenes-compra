@@ -1,0 +1,14 @@
+{
+  "id": "sol-002-correo",
+  "de": "sofía.herrera@periferia-ficticia.com",
+  "para": "compras@periferia-ficticia.com",
+  "asunto": "Solicitud de orden de compra SOL-002 - Licencia anual herramienta de pruebas au",
+  "fecha": "2026-08-22T09:00:00-05:00",
+  "cuerpo": "Hola Camila,\n\nAdjunto la solicitud de compra, la cotización del proveedor y el correo de aprobación de mi líder. Quedo atento a la orden de compra.\n\nGracias,\nSofía Herrera",
+  "adjuntos": [
+    "solicitud.xlsx",
+    "cotizacion.pdf",
+    "aprobacion.eml"
+  ],
+  "nota_fixture": "Los adjuntos binarios se entregan normalizados: solicitud.xlsx → solicitud.json, cotizacion.pdf → cotizacion.txt, aprobacion.eml → aprobacion.json, factura.pdf → factura.txt"
+}

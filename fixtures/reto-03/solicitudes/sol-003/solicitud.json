@@ -1,0 +1,16 @@
+{
+  "solicitud_id": "SOL-2026-003",
+  "solicitante": "Pedro Ayala",
+  "proveedor_nombre": "Mobiliario Andino S.A.",
+  "proveedor_nit": "830111222",
+  "descripcion": "Mobiliario para nueva sede: 40 puestos de trabajo con silla ergonómica",
+  "centro_costo": "CC-2020",
+  "subarea": "Servicios Generales",
+  "cantidad": 40,
+  "valor_unitario": 1850000,
+  "valor_total": 74000000,
+  "moneda": "COP",
+  "indicador_iva": "C1",
+  "condiciones_pago": "Z030",
+  "fecha_solicitud": "2026-08-24"
+}

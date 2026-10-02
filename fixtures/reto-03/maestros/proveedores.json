@@ -1,0 +1,42 @@
+[
+  {
+    "codigo_sap": "100234",
+    "nit": "900555111",
+    "nombre": "TecnoSuministros S.A.S.",
+    "condiciones_pago_default": "Z030",
+    "indicador_iva_default": "C1",
+    "activo": true
+  },
+  {
+    "codigo_sap": "100310",
+    "nit": "901222333",
+    "nombre": "Cloud Andina S.A.S.",
+    "condiciones_pago_default": "Z000",
+    "indicador_iva_default": "C1",
+    "activo": true
+  },
+  {
+    "codigo_sap": "100118",
+    "nit": "800444555",
+    "nombre": "Papelería Central Ltda.",
+    "condiciones_pago_default": "Z015",
+    "indicador_iva_default": "C1",
+    "activo": true
+  },
+  {
+    "codigo_sap": "100150",
+    "nit": "830111222",
+    "nombre": "Mobiliario Andino S.A.",
+    "condiciones_pago_default": "Z030",
+    "indicador_iva_default": "C1",
+    "activo": true
+  },
+  {
+    "codigo_sap": "100402",
+    "nit": "901777888",
+    "nombre": "Consultores Ágiles S.A.S.",
+    "condiciones_pago_default": "Z030",
+    "indicador_iva_default": "C1",
+    "activo": false
+  }
+]

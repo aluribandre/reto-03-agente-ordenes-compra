@@ -1,0 +1,16 @@
+{
+  "solicitud_id": "SOL-2026-004",
+  "solicitante": "Natalia Ríos",
+  "proveedor_nombre": "Cloud Andina S.A.S.",
+  "proveedor_nit": "901222333",
+  "descripcion": "Bolsa de 100 horas de arquitectura de nube para migración",
+  "centro_costo": "CC-1010",
+  "subarea": "Desarrollo",
+  "cantidad": 100,
+  "valor_unitario": 250000,
+  "valor_total": 25000000,
+  "moneda": "COP",
+  "indicador_iva": "C1",
+  "condiciones_pago": "Z000",
+  "fecha_solicitud": "2026-08-26"
+}

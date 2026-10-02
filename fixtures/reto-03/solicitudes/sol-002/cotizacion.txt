@@ -1,0 +1,15 @@
+COTIZACIÓN SDN-0093
+Fecha: 2026-08-21
+Proveedor: Soluciones Digitales del Norte S.A.S.
+NIT: 901.999.000-5
+Cliente: Periferia IT Group S.A.S. - NIT 900.123.456-7
+
+ÍTEMS
+1. Licencia anual pruebas automatizadas, por usuario | Cantidad: 5 | Precio unitario (IVA incl.): COP 1.700.000 | Subtotal: COP 8.500.000
+
+Base gravable: COP 7.142.857
+IVA 19%: COP 1.357.143
+TOTAL (IVA incluido): COP 8.500.000
+
+Validez de la oferta: 15 días
+Condiciones de pago: según acuerdo comercial vigente.

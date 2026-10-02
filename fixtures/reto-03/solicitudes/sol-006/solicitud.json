@@ -1,0 +1,13 @@
+{
+  "solicitud_id": "SOL-2026-006",
+  "solicitante": "Andrés Beltrán",
+  "proveedor_nombre": "TecnoSuministros S.A.S.",
+  "descripcion": "Diademas con micrófono para la mesa de soporte",
+  "centro_costo": "CC-1010",
+  "subarea": "Soporte",
+  "cantidad": 30,
+  "valor_unitario": 180000,
+  "valor_total": 5400000,
+  "moneda": "COP",
+  "fecha_solicitud": "2026-08-29"
+}

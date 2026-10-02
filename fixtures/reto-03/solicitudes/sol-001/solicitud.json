@@ -1,0 +1,16 @@
+{
+  "solicitud_id": "SOL-2026-001",
+  "solicitante": "Juan Camargo",
+  "proveedor_nombre": "TecnoSuministros S.A.S.",
+  "proveedor_nit": "900555111",
+  "descripcion": "Renovación licencias antivirus corporativo 120 puestos, vigencia 12 meses",
+  "centro_costo": "CC-1010",
+  "subarea": "Infraestructura",
+  "cantidad": 120,
+  "valor_unitario": 95000,
+  "valor_total": 11400000,
+  "moneda": "COP",
+  "indicador_iva": "C1",
+  "condiciones_pago": "Z030",
+  "fecha_solicitud": "2026-08-20"
+}

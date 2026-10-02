@@ -1,0 +1,14 @@
+{
+  "id": "sol-003-correo",
+  "de": "pedro.ayala@periferia-ficticia.com",
+  "para": "compras@periferia-ficticia.com",
+  "asunto": "Solicitud de orden de compra SOL-003 - Mobiliario para nueva sede: 40 puestos d",
+  "fecha": "2026-08-24T09:00:00-05:00",
+  "cuerpo": "Hola Camila,\n\nAdjunto la solicitud de compra, la cotización del proveedor y el correo de aprobación de mi líder. Quedo atento a la orden de compra.\n\nGracias,\nPedro Ayala",
+  "adjuntos": [
+    "solicitud.xlsx",
+    "cotizacion.pdf",
+    "aprobacion.eml"
+  ],
+  "nota_fixture": "Los adjuntos binarios se entregan normalizados: solicitud.xlsx → solicitud.json, cotizacion.pdf → cotizacion.txt, aprobacion.eml → aprobacion.json, factura.pdf → factura.txt"
+}

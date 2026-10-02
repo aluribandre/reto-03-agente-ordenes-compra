@@ -1,0 +1,53 @@
+[
+  {
+    "centro_costo": "CC-1010",
+    "nombre": "Tecnología",
+    "subareas": [
+      "Infraestructura",
+      "Soporte",
+      "Desarrollo"
+    ],
+    "aprobadores": [
+      {
+        "email": "mlopez@periferia-ficticia.com",
+        "nombre": "Mariana López Cárdenas",
+        "tope": 50000000
+      },
+      {
+        "email": "dgarcia@periferia-ficticia.com",
+        "nombre": "Diego García Rincón",
+        "tope": 200000000
+      }
+    ]
+  },
+  {
+    "centro_costo": "CC-2020",
+    "nombre": "Administración",
+    "subareas": [
+      "Compras",
+      "Servicios Generales"
+    ],
+    "aprobadores": [
+      {
+        "email": "rtorres@periferia-ficticia.com",
+        "nombre": "Rocío Torres Ibáñez",
+        "tope": 30000000
+      }
+    ]
+  },
+  {
+    "centro_costo": "CC-3030",
+    "nombre": "Comercial",
+    "subareas": [
+      "Preventa",
+      "Marketing"
+    ],
+    "aprobadores": [
+      {
+        "email": "fvargas@periferia-ficticia.com",
+        "nombre": "Felipe Vargas Ocampo",
+        "tope": 80000000
+      }
+    ]
+  }
+]

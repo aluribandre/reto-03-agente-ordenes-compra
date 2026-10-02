@@ -1,0 +1,16 @@
+{
+  "solicitud_id": "SOL-2026-002",
+  "solicitante": "Sofía Herrera",
+  "proveedor_nombre": "Soluciones Digitales del Norte S.A.S.",
+  "proveedor_nit": "901999000",
+  "descripcion": "Licencia anual herramienta de pruebas automatizadas, 5 usuarios",
+  "centro_costo": "CC-1010",
+  "subarea": "Desarrollo",
+  "cantidad": 5,
+  "valor_unitario": 1700000,
+  "valor_total": 8500000,
+  "moneda": "COP",
+  "indicador_iva": "C1",
+  "condiciones_pago": "Z030",
+  "fecha_solicitud": "2026-08-22"
+}

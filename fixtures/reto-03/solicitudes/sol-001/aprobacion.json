@@ -1,0 +1,10 @@
+{
+  "de": "mlopez@periferia-ficticia.com",
+  "para": "juan.camargo@periferia-ficticia.com",
+  "cc": [
+    "compras@periferia-ficticia.com"
+  ],
+  "fecha": "2026-08-21T10:02:00-05:00",
+  "asunto": "RE: Solicitud de orden de compra SOL-001",
+  "cuerpo": "Aprobado, proceder con la orden de compra.\n\nMariana López\nGerente de Tecnología"
+}

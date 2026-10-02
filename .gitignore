@@ -1,0 +1,15 @@
+# Dependencias y artefactos generados (PRD 9.5: sin node_modules/, sin out/, sin .env)
+node_modules/
+out/
+
+# Variables de entorno: solo se versiona .env.example
+.env
+.env.*
+!.env.example
+
+# Ruido de sistema y editores
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
