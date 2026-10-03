@@ -25,6 +25,7 @@ Documento técnico de decisión. Para instalar y ejecutar, ver [README.md](READM
 17. [Uso de IA](#17-uso-de-ia)
 18. [Riesgos, limitaciones y evolución a producción](#18-riesgos-limitaciones-y-evolución-a-producción)
 19. [Deployment de demostración](#19-deployment-de-demostración)
+20. [Bonus opcional](#20-bonus-opcional)
 
 ---
 
@@ -428,11 +429,11 @@ Calculable directamente desde `control.csv` (filas `resultado = exitoso`). Convi
 | Front: llamadas a tools (6.1) | Hecho | Tarjetas con nombre, argumentos (proyección segura) y resultado resumido |
 | API mínima (6.4) | Hecho | Diseño propio documentado en el README; `/api/confirm` para el botón y health minimizado (sección 3, decisiones A–C) |
 | Link público (9.3) | Hecho | https://oc-agent-reto03.onrender.com/ (Render Free; sección 19) |
-| Bonus `modulo/` (9.4) | No hecho | — |
+| Bonus `modulo/` (9.4) | Hecho | Sección 20 |
 
 ### Pruebas
 
-- **226 tests** en 8 archivos (`bun test`), sin red ni API key. Cobertura aproximada: **94,3 % de funciones y 97,3 % de líneas** (`bun test --coverage`).
+- **235 tests** en 9 archivos (`bun test`), sin red ni API key. Cobertura aproximada: **94,6 % de funciones y 96,2 % de líneas** (`bun test --coverage`).
 - **Contrato y argumentos no confiables**: paquete, derivados y payload manipulados (incluido un paquete que "resolvería" RC5 y un IVA `C9` frente al `C1` derivado), `confirmado: true` sin autorización, autorización sin `confirmado`, argumentos no documentados, y tarjetas de tools sin contenido sensible. Lo no cubierto es principalmente la llamada real al proveedor y la carga de configuración desde el entorno.
 - **Dominio**: matriz completa RC1–RC10 sobre los 6 casos, bordes exactos (±2 % de RC5, tope de RC3, misma fecha en RC8), invariantes de `NO_EVALUABLE`.
 - **Integridad**: manipulación de payload, evidencia, trazabilidad y catálogos.
@@ -520,3 +521,27 @@ Calculable directamente desde `control.csv` (filas `resultado = exitoso`). Convi
 - El filesystem de Render Free es efímero. Las sesiones, confirmaciones pendientes y autorizaciones viven en memoria, así que un reinicio o una suspensión por inactividad pierde las sesiones y `out/` (OC, `control.csv`, logs), y la numeración vuelve a empezar.
 - La primera petición tras un periodo de inactividad puede tardar mientras el servicio despierta.
 - La persistencia durable (base de datos, volumen o SAP real) pertenece a la evolución productiva (sección 18).
+
+## 20. Bonus opcional
+
+`modulo/` empaqueta el agente para otras plataformas de agentes sin depender del servidor (PRD 9.4). Detalle de uso en [modulo/README.md](modulo/README.md).
+
+| Pieza | Contenido | Por qué no es una copia divergente |
+|---|---|---|
+| `modulo/agent.md` | Frontmatter `description`, `mode: primary`, `permission {edit: deny, bash: deny}`; cuerpo: el system prompt | Generado por `modulo/sincronizar.ts` desde `agent/prompt.md`, byte a byte |
+| `modulo/skill/ordenes-compra/SKILL.md` | Frontmatter `name`, `description`; cuerpo: el conocimiento del proceso | Generado desde `src/knowledge/ordenes-compra.md`, byte a byte |
+| `modulo/tools/oc.ts` | Las 5 tools `oc_*` | Reexporta las tools de `src/tools/oc.ts`: misma `description`, mismos esquemas `args` (mismo objeto) y `execute` delegado; solo adapta el contexto `{ directory, sessionId }` |
+
+`tests/modulo.test.ts` verifica:
+
+- el frontmatter exigido;
+- que los cuerpos coincidan con las fuentes de la aplicación;
+- la identidad de las tools;
+- que no se importe el servidor;
+- el flujo con el contexto mínimo de otra plataforma: sol-001 crea la OC y sol-004 falla cerrado sin autorización del anfitrión.
+
+**Trade-offs:**
+
+- **Sin cambios en el core.** El P0 no se modificó: la aplicación ya leía prompt y conocimiento de esas dos fuentes, así que el módulo se genera a partir de ellas en lugar de cambiar cómo arranca el servidor. El costo es un paso de regeneración, cuya omisión detectan los tests.
+- **Dependencia del repositorio.** El módulo importa `src/`, así que se distribuye con este repositorio, no como paquete independiente.
+- **Confirmación humana.** Las OC que la requieren solo se crean si la plataforma anfitriona aporta su propio runtime de autorización (`ctx.autorizacion`).

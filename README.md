@@ -215,8 +215,8 @@ bun test --coverage
 bun run typecheck
 ```
 
-- **226 tests** en 8 archivos, sin red ni API key (el LLM se sustituye por adaptadores guionados o por reglas; el adaptador Anthropic se prueba contra un servidor falso local).
-- Cobertura aproximada: **94,3 % de funciones · 97,3 % de líneas** (lo no cubierto es principalmente la carga de configuración desde el entorno y el arranque del servidor).
+- **235 tests** en 9 archivos, sin red ni API key (el LLM se sustituye por adaptadores guionados o por reglas; el adaptador Anthropic se prueba contra un servidor falso local).
+- Cobertura aproximada: **94,6 % de funciones · 96,2 % de líneas** (lo no cubierto es principalmente la carga de configuración desde el entorno, el arranque del servidor y la CLI de `modulo/sincronizar.ts`).
 - Incluyen: matriz RC1–RC10 y bordes, argumentos del modelo manipulados (paquete, derivados, payload, `confirmado` sin autorización), manipulación de artefactos (payload, evidencia, trazabilidad, catálogos), fallos parciales SAP/persistencia, concurrencia, aislamiento de sesiones, seguridad HTTP (path traversal, límites, tipos de contenido) y 10 escenarios de regresión de extremo a extremo en [tests/regresion.test.ts](tests/regresion.test.ts).
 - Cada suite verifica que `fixtures/` no cambió.
 
@@ -278,9 +278,13 @@ reto-03/
 - Sin streaming de respuestas.
 - Los tests no llaman al LLM real (no hay API key en CI/local); la integración con Anthropic se validó con un smoke test manual en la demo pública.
 - En la demo de Render (plan Free), `out/` y las sesiones se pierden al reiniciar el servicio.
-- Módulo reutilizable (`modulo/`, bonus) no incluido en esta entrega.
+- El módulo reutilizable (`modulo/`) se distribuye junto con este repositorio (importa el código de `src/`), no como paquete independiente.
 
 Lista completa y mitigaciones: [SOLUCION.md](SOLUCION.md#18-riesgos-limitaciones-y-evolución-a-producción).
+
+## Bonus: módulo reutilizable
+
+[`modulo/`](modulo/README.md) empaqueta el agente para otras plataformas de agentes sin depender del servidor (PRD 9.4). Incluye `agent.md` (el system prompt), `tools/oc.ts` (las mismas 5 tools) y la skill `ordenes-compra` (el conocimiento del proceso). Son las mismas piezas que usa la aplicación, verificadas por tests. Para probarlo: `bun run modulo/ejemplo.ts`.
 
 ## Documentación técnica
 
