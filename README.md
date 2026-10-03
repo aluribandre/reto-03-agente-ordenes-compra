@@ -21,6 +21,7 @@ Agente conversacional que convierte un paquete de compra (correo, solicitud, cot
 
 ## Contenido
 
+1. [Demo online](#demo-online)
 1. [Demo rápida](#demo-rápida)
 2. [Arquitectura](#arquitectura)
 3. [Requisitos](#requisitos)
@@ -37,6 +38,21 @@ Agente conversacional que convierte un paquete de compra (correo, solicitud, cot
 14. [Documentación técnica](#documentación-técnica)
 
 ---
+
+## Demo online
+
+- **Repositorio:** https://github.com/aluribandre/reto-03-agente-ordenes-compra
+- **Demo pública:** https://oc-agent-reto03.onrender.com/
+
+La demo usa el **SAP simulado** y el modelo real de Anthropic. El servicio está desplegado en Render (plan Free), con dos consecuencias:
+
+- El servicio **se duerme tras un periodo de inactividad**: la primera petición puede tardar cerca de un minuto mientras arranca.
+- El filesystem es **efímero**: `out/` (OC creadas, `control.csv`, logs) y las sesiones en memoria se pierden al reiniciar el servicio. No afecta la demostración funcional, pero sí la persistencia entre reinicios; por ejemplo, tras un reinicio la numeración de OC vuelve a `4500000001`.
+
+Cómo probarla:
+
+1. Escribe `Procesa sol-001` → el agente ejecuta las herramientas y **crea la OC automáticamente** (sin confirmaciones).
+2. Escribe `Procesa sol-004` → el agente detecta **RC5** (cotización 6 % sobre la solicitud) y aparece el aviso de confirmación humana. Pulsa **«Confirmar y continuar»** → se crea la OC por **COP 25.000.000** (el valor de la solicitud, no el de la cotización).
 
 ## Demo rápida
 
@@ -199,8 +215,8 @@ bun test --coverage
 bun run typecheck
 ```
 
-- **222 tests** en 8 archivos, sin red ni API key (el LLM se sustituye por adaptadores guionados o por reglas).
-- Cobertura aproximada: **90,4 % de funciones · 93,0 % de líneas** (lo no cubierto es principalmente la llamada real al proveedor y la carga de configuración desde el entorno).
+- **226 tests** en 8 archivos, sin red ni API key (el LLM se sustituye por adaptadores guionados o por reglas; el adaptador Anthropic se prueba contra un servidor falso local).
+- Cobertura aproximada: **94,3 % de funciones · 97,3 % de líneas** (lo no cubierto es principalmente la carga de configuración desde el entorno y el arranque del servidor).
 - Incluyen: matriz RC1–RC10 y bordes, argumentos del modelo manipulados (paquete, derivados, payload, `confirmado` sin autorización), manipulación de artefactos (payload, evidencia, trazabilidad, catálogos), fallos parciales SAP/persistencia, concurrencia, aislamiento de sesiones, seguridad HTTP (path traversal, límites, tipos de contenido) y 10 escenarios de regresión de extremo a extremo en [tests/regresion.test.ts](tests/regresion.test.ts).
 - Cada suite verifica que `fixtures/` no cambió.
 
@@ -260,8 +276,9 @@ reto-03/
 - Sin autenticación de usuarios.
 - Evidencia en `.txt` (P0); el PDF (P1) no está implementado.
 - Sin streaming de respuestas.
-- La integración con el LLM real no se ejerce en los tests (no hay API key en CI/local); el adaptador compila y su traducción de errores está probada.
-- Link público de prueba y módulo reutilizable (`modulo/`, bonus) no incluidos en esta entrega.
+- Los tests no llaman al LLM real (no hay API key en CI/local); la integración con Anthropic se validó con un smoke test manual en la demo pública.
+- En la demo de Render (plan Free), `out/` y las sesiones se pierden al reiniciar el servicio.
+- Módulo reutilizable (`modulo/`, bonus) no incluido en esta entrega.
 
 Lista completa y mitigaciones: [SOLUCION.md](SOLUCION.md#18-riesgos-limitaciones-y-evolución-a-producción).
 

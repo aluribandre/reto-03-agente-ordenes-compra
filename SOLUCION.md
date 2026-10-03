@@ -24,6 +24,7 @@ Documento técnico de decisión. Para instalar y ejecutar, ver [README.md](READM
 16. [Cobertura y pruebas](#16-cobertura-y-pruebas)
 17. [Uso de IA](#17-uso-de-ia)
 18. [Riesgos, limitaciones y evolución a producción](#18-riesgos-limitaciones-y-evolución-a-producción)
+19. [Deployment de demostración](#19-deployment-de-demostración)
 
 ---
 
@@ -146,13 +147,13 @@ El historial es append-only y siempre válido: toda llamada a tool recibe su res
 - **Por qué**: el valor del agente está en orquestar tools de forma fiable, seguir guardrails y explicar resultados con precisión en español; un modelo de primera línea reduce errores de orquestación en un flujo de 5 tools. El riesgo de negocio no depende del modelo: reglas, montos y autorización están fuera de él, por lo que cambiar a un modelo más económico es una decisión de costo/experiencia, no de control.
 - **Proveedor intercambiable**: el loop solo conoce `LlmAdapter` (`enviar(mensajes, herramientas, sistema)`); añadir otro proveedor es una clase nueva.
 
-**Costo por caso (estimación de diseño, no medición).** Durante esta prueba el adaptador Anthropic no se ejecutó contra la API: no hubo consumo real facturable y no se reporta costo monetario.
+**Costo por caso (estimación de diseño, no benchmark).** El adaptador Anthropic se probó en la demo pública con llamadas reales a `claude-opus-5-5` (smoke test de sol-001 y sol-004, sección 19). Eso valida la integración, no el costo: no se hizo un benchmark financiero exhaustivo y no se reporta costo monetario por caso.
 
-- **Qué se verificó:** el `AnthropicAdapter` compila contra el SDK y se construye sin clave explícita; su traducción de errores está probada. El loop solo depende de la interfaz `LlmAdapter`. Los tests del agent loop usan adaptadores LLM guionados (`LlmGuionado`) y por reglas (`LlmReglas`), sin red.
+- **Qué se verificó:** el `AnthropicAdapter` funciona contra la API real en el deployment. En los tests (sin red ni clave) se prueban su traducción de errores y su diagnóstico saneado contra un servidor falso local. El loop solo depende de la interfaz `LlmAdapter`, y sus tests usan adaptadores guionados (`LlmGuionado`) y por reglas (`LlmReglas`).
 - **Tamaño del contexto:** como referencia de diseño, el flujo acumula del orden de decenas de miles de tokens de entrada por caso. Cada una de las ~6 llamadas al modelo de un caso completo reenvía el prefijo fijo y el historial con los resultados de tools.
   - Prefijo fijo: ~9.000 caracteres de system prompt más ~2.200 de definiciones de tools.
   - Resultados de tools de un caso completo: ~6.000–7.000 caracteres (sol-001 y sol-004, ejecutando las tools localmente).
-- **Orden de magnitud:** para planificación se estimaron ~20–30k tokens de entrada y ~1–4k de salida en un flujo completo. Esto no es una medición contra Anthropic.
+- **Orden de magnitud:** para planificación se estimaron ~20–30k tokens de entrada y ~1–4k de salida en un flujo completo. Se mantiene como referencia: el smoke test real no midió consumo por caso.
 - **Costo efectivo:** dependerá del modelo y su precio vigente, y del patrón real de conversación (turnos, reintentos, longitud de las respuestas). Se aproxima con `tokens_entrada × precio_entrada + tokens_salida × precio_salida`.
 - **Palancas:** como el prefijo fijo se repite en cada llamada, **prompt caching** es la primera palanca de reducción (evolución, no implementada). `MAX_TOKENS_SESION` acota el gasto por sesión.
 
@@ -426,12 +427,12 @@ Calculable directamente desde `control.csv` (filas `resultado = exitoso`). Convi
 | Contrato de herramientas (6.2) | Hecho | Firmas literales; argumentos del modelo verificados contra el estado canónico (sección 3) |
 | Front: llamadas a tools (6.1) | Hecho | Tarjetas con nombre, argumentos (proyección segura) y resultado resumido |
 | API mínima (6.4) | Hecho | Diseño propio documentado en el README; `/api/confirm` para el botón y health minimizado (sección 3, decisiones A–C) |
-| Link público (9.3) | Pendiente | Fuera del alcance de esta fase |
+| Link público (9.3) | Hecho | https://oc-agent-reto03.onrender.com/ (Render Free; sección 19) |
 | Bonus `modulo/` (9.4) | No hecho | — |
 
 ### Pruebas
 
-- **222 tests** en 8 archivos (`bun test`), sin red ni API key. Cobertura aproximada: **90,4 % de funciones y 93,0 % de líneas** (`bun test --coverage`).
+- **226 tests** en 8 archivos (`bun test`), sin red ni API key. Cobertura aproximada: **94,3 % de funciones y 97,3 % de líneas** (`bun test --coverage`).
 - **Contrato y argumentos no confiables**: paquete, derivados y payload manipulados (incluido un paquete que "resolvería" RC5 y un IVA `C9` frente al `C1` derivado), `confirmado: true` sin autorización, autorización sin `confirmado`, argumentos no documentados, y tarjetas de tools sin contenido sensible. Lo no cubierto es principalmente la llamada real al proveedor y la carga de configuración desde el entorno.
 - **Dominio**: matriz completa RC1–RC10 sobre los 6 casos, bordes exactos (±2 % de RC5, tope de RC3, misma fecha en RC8), invariantes de `NO_EVALUABLE`.
 - **Integridad**: manipulación de payload, evidencia, trazabilidad y catálogos.
@@ -463,11 +464,12 @@ Calculable directamente desde `control.csv` (filas `resultado = exitoso`). Convi
 - Sin persistencia de la conversación.
 - Candados solo en proceso; sin locking distribuido (una sola instancia).
 - Sin autenticación; `sessionId` no identifica a una persona.
-- La integración con el LLM real no se ejerce en tests (no hay API key en CI/local). El `AnthropicAdapter` compila contra el SDK y su traducción de errores está probada; el resto del loop se prueba con adaptadores falsos.
+- Los tests automatizados no llaman al LLM real (no hay API key en CI/local); la integración con Anthropic se validó con un smoke test manual en la demo pública (sección 19).
+- En la demo de Render (plan Free), un reinicio pierde `out/`, sesiones, pendientes y autorizaciones (sección 19).
 - Sin streaming de respuestas.
 - Evidencia PDF (P1) no implementada.
 - `ejecucion.json` registra la autorización presentada con `consumida: false`; el consumo vive en el runtime.
-- Las tools exigen que el modelo retransmita `paquete`, `derivados` y `payload` sin cambios. Con un LLM real, una retransmisión imperfecta (campo omitido o reformateado) produce un rechazo explícito, nunca una OC con datos alterados. Esto no se ha medido contra el proveedor real.
+- Las tools exigen que el modelo retransmita `paquete`, `derivados` y `payload` sin cambios. Con un LLM real, una retransmisión imperfecta (campo omitido o reformateado) produce un rechazo explícito, nunca una OC con datos alterados. En el smoke test real sol-001 y sol-004 completaron el flujo; no se midió la tasa de rechazos en volumen.
 - Las frases de confirmación están en español y son una lista cerrada.
 
 ### Riesgos de llevarlo a producción
@@ -493,3 +495,28 @@ Calculable directamente desde `control.csv` (filas `resultado = exitoso`). Convi
 6. Despliegue con alta disponibilidad (requiere los puntos 2 y 3).
 7. Prompt caching y, tras medir costo y beneficio, fallback de modelo opcional.
 8. Evidencia en PDF (P1).
+
+## 19. Deployment de demostración
+
+| Aspecto | Valor |
+|---|---|
+| Plataforma | Render Web Service (plan Free) |
+| Runtime | Bun 1.4.2 sobre el entorno Node de Render (soporte nativo de Bun, sin Docker) |
+| Build | `bun install --frozen-lockfile` |
+| Start | `bun run start` (el puerto lo inyecta Render vía `PORT`) |
+| Variables | `ANTHROPIC_API_KEY`, configurada solo en el panel de Render |
+| URL | https://oc-agent-reto03.onrender.com/ |
+| Repositorio | https://github.com/aluribandre/reto-03-agente-ordenes-compra |
+| Estado | Deployment público validado con smoke test |
+
+**Smoke test realizado** con Anthropic real (`claude-opus-5-5`):
+
+- **sol-001**: camino feliz autónomo; el agente ejecutó las cinco herramientas y creó la OC sin confirmación humana.
+- **sol-004**: HITL completo. El agente detectó RC5 (25.000.000 vs 26.500.000, 6 %) y el runtime registró la confirmación pendiente. El usuario confirmó, `oc_crear` se ejecutó con autorización válida del runtime y se creó la OC `4500000002` por **COP 25.000.000**, no por 26.500.000, con el payload sellado preservado.
+
+**Limitaciones conocidas de este deployment de demostración** (no son defectos de la solución):
+
+- SAP sigue siendo el `MockSapAdapter`.
+- El filesystem de Render Free es efímero. Las sesiones, confirmaciones pendientes y autorizaciones viven en memoria, así que un reinicio o una suspensión por inactividad pierde las sesiones y `out/` (OC, `control.csv`, logs), y la numeración vuelve a empezar.
+- La primera petición tras un periodo de inactividad puede tardar mientras el servicio despierta.
+- La persistencia durable (base de datos, volumen o SAP real) pertenece a la evolución productiva (sección 18).
