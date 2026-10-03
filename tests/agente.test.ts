@@ -7,7 +7,7 @@ import { cargarSistema, definicionesTools, ejecutarTurno, type OpcionesAgente } 
 import { crearSesion, type Sesion } from "../src/agent/sesiones"
 import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, crearReloj } from "../src/config"
 import { ErrorLlm, type DefinicionTool, type LlamadaTool, type LlmAdapter, type Mensaje, type RespuestaLlm, type ResultadoLlamada } from "../src/llm/adapter"
-import { AnthropicAdapter, traducirError } from "../src/llm/anthropic"
+import { AnthropicAdapter, diagnosticoError, sanearDiagnostico, traducirError } from "../src/llm/anthropic"
 import { clasificarMensaje, efectoSobreAutorizacion, resolverEntrada, type PendienteConfirmacion } from "../src/agent/autorizacion"
 import { payloadSha } from "../src/domain/sello"
 import { leerControl, leerEjecucion, leerJsonl, leerPayloadSellado } from "../src/persistencia"
@@ -329,6 +329,59 @@ describe("herramientas expuestas y adaptador", () => {
     expect(firma("oc_construir_payload")).toEqual([["caso", "derivados", "paquete"], ["caso", "paquete", "derivados"], false])
     expect(firma("oc_crear")).toEqual([["caso", "confirmado", "payload"], ["caso", "payload"], false])
     expect(crear?.descripcion).toContain("payload")
+  })
+
+  test("diagnóstico saneado: redacta claves y rutas, conserva status/tipo/request_id y trunca a 500", () => {
+    const largo = "x".repeat(2000)
+    expect(sanearDiagnostico(`clave sk-ant-test-123 en C:\\Users\\secreto\\app.ts y /opt/render/project/src/server.ts; doc https://docs.anthropic.com/en/api ${largo}`)).toStartWith(
+      "clave sk-ant-[redactado] en [ruta] y [ruta]; doc https://docs.anthropic.com/en/api xxx",
+    )
+    expect(sanearDiagnostico(largo)).toHaveLength(501) // 500 + "…"
+    expect(sanearDiagnostico('tools.1.input_schema: "pattern" inválido')).toBe("tools.1.input_schema: 'pattern' inválido")
+    // Sin respuesta HTTP (red/timeout) no hay línea de diagnóstico.
+    expect(diagnosticoError(new Anthropic.APIConnectionTimeoutError())).toBeNull()
+    expect(diagnosticoError(new Error("cualquiera"))).toBeNull()
+  })
+
+  test("un 400 real del SDK: el usuario recibe el mensaje fijo y stderr una sola línea saneada", async () => {
+    const largo = "y".repeat(2000)
+    const proveedor = Bun.serve({
+      port: 0,
+      fetch: () =>
+        Response.json(
+          { type: "error", error: { type: "invalid_request_error", message: `tools.0.input_schema rechazado; clave sk-ant-test-123; ruta C:\\Users\\secreto\\x.ts y /opt/render/project/src/server.ts ${largo}` }, request_id: "req_test_abc" },
+          { status: 400, headers: { "request-id": "req_test_abc" } },
+        ),
+    })
+    const anterior = { clave: process.env["ANTHROPIC_API_KEY"], base: process.env["ANTHROPIC_BASE_URL"], token: process.env["ANTHROPIC_AUTH_TOKEN"] }
+    const lineas: string[] = []
+    const errorOriginal = console.error
+    try {
+      process.env["ANTHROPIC_API_KEY"] = "sk-ant-test-123"
+      process.env["ANTHROPIC_BASE_URL"] = `http://127.0.0.1:${proveedor.port}`
+      delete process.env["ANTHROPIC_AUTH_TOKEN"]
+      console.error = (...args: unknown[]) => void lineas.push(args.map(String).join(" "))
+      const adaptador = new AnthropicAdapter({ modelo: "claude-opus-5-5", maxTokens: 1000, timeoutMs: 5000, maxReintentos: 0, esfuerzo: "medium" })
+      const error = await adaptador.enviar([{ rol: "usuario", texto: "hola" }], [], "sistema").then(
+        () => null,
+        (e: unknown) => e,
+      )
+      expect(error).toBeInstanceOf(ErrorLlm)
+      expect(error instanceof ErrorLlm ? [error.tipo, error.message] : null).toEqual(["peticion_invalida", "El proveedor rechazó la petición por inválida."])
+    } finally {
+      console.error = errorOriginal
+      for (const [k, v] of [["ANTHROPIC_API_KEY", anterior.clave], ["ANTHROPIC_BASE_URL", anterior.base], ["ANTHROPIC_AUTH_TOKEN", anterior.token]] as const) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      await proveedor.stop(true)
+    }
+    expect(lineas).toHaveLength(1)
+    const [linea] = lineas
+    expect(linea).toStartWith('[anthropic] status=400 type=invalid_request_error request_id=req_test_abc message="tools.0.input_schema rechazado; clave sk-ant-[redactado]; ruta [ruta] y [ruta] yyy')
+    for (const prohibido of ["sk-ant-test-123", "C:\\Users", "secreto", "/opt/render", "x-api-key", "hola", "sistema"]) expect(linea).not.toContain(prohibido)
+    const mensaje = /message="(.*)"$/.exec(linea ?? "")?.[1] ?? ""
+    expect(mensaje.length).toBe(501)
   })
 
   test("AnthropicAdapter se construye sin clave explícita y expone proveedor y modelo", () => {

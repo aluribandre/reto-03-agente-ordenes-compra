@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { z } from "zod"
 import { cargarSistema } from "../src/agent/loop"
-import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, crearReloj } from "../src/config"
+import { FECHA_REFERENCIA_DEMO, RAIZ_PROYECTO, cargarConfig, crearReloj } from "../src/config"
 import type { DefinicionTool, LlamadaTool, LlmAdapter, Mensaje, RespuestaLlm, ResultadoLlamada } from "../src/llm/adapter"
 import { leerJsonl } from "../src/persistencia"
 import { payloadSha } from "../src/domain/sello"
@@ -330,6 +330,41 @@ describe("estáticos y saneamiento", () => {
       expect([ruta, r.status]).toEqual([ruta, 404])
     }
     expect((await pedir(a, "/api/inexistente")).status).toBe(404)
+  })
+
+  test("N'. routing por pathname: estáticos y health responden también con query string; traversal sigue bloqueado", async () => {
+    const { a } = await app(null, RAIZ_PROYECTO)
+    const raiz = await pedir(a, "/")
+    expect([raiz.status, raiz.tipo]).toEqual([200, "text/html; charset=utf-8"])
+    expect(raiz.texto).toContain("<title>Agente de Órdenes de Compra</title>")
+    for (const [ruta, tipo] of [
+      ["/?utm_source=test", "text/html"],
+      ["/index.html", "text/html"],
+      ["/index.html?v=2", "text/html"],
+      ["/app.js", "javascript"],
+      ["/app.js?v=2", "javascript"],
+      ["/styles.css", "text/css"],
+      ["/api/health", "application/json"],
+      ["/api/health?x=1", "application/json"],
+    ] as const) {
+      const r = await pedir(a, ruta)
+      expect([ruta, r.status, r.tipo.includes(tipo)]).toEqual([ruta, 200, true])
+    }
+    for (const ruta of ["/../package.json", "/%2e%2e/package.json", "/../package.json?x=1"]) expect([ruta, (await pedir(a, ruta)).status]).toEqual([ruta, 404])
+  })
+
+  test("los estáticos se resuelven desde la raíz del proyecto (import.meta), no desde el cwd del proceso", async () => {
+    const anterior = process.cwd()
+    try {
+      process.chdir(tmpdir())
+      const config = cargarConfig({})
+      expect(config.raiz).toBe(RAIZ_PROYECTO)
+      const { a } = await app(null, config.raiz)
+      expect((await pedir(a, "/")).status).toBe(200)
+      expect((await pedir(a, "/app.js")).status).toBe(200)
+    } finally {
+      process.chdir(anterior)
+    }
   })
 
   test("K. ninguna respuesta de la API incluye rutas absolutas ni trazas", () => {

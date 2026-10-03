@@ -2,6 +2,7 @@
 // - La clave la resuelve el SDK desde el entorno (ANTHROPIC_API_KEY); nunca pasa por este módulo.
 // - Timeout y reintentos acotados (opciones del SDK); sin streaming.
 // - Errores traducidos a ErrorLlm con mensajes fijos: nunca se reenvía el texto crudo del proveedor.
+//   Para operación, los errores HTTP dejan una línea saneada en stderr (diagnosticoError).
 import Anthropic from "@anthropic-ai/sdk"
 import { ErrorLlm, type DefinicionTool, type LlmAdapter, type Mensaje, type MotivoFin, type RespuestaLlm } from "./adapter"
 
@@ -87,6 +88,43 @@ export function traducirError(e: unknown): ErrorLlm {
   return new ErrorLlm("desconocido", "Error inesperado al llamar al modelo.")
 }
 
+// ---------------------------------------------------------------------------
+// Diagnóstico saneado para stderr (operación). El usuario sigue viendo solo el mensaje fijo.
+// Solo status, tipo, request_id y el mensaje del proveedor redactado y truncado: nunca
+// cabeceras, clave, system prompt, mensajes, documentos ni inputs de tools.
+// ---------------------------------------------------------------------------
+
+const MAX_MENSAJE_DIAGNOSTICO = 500
+
+export function sanearDiagnostico(texto: string): string {
+  const saneado = texto
+    .replace(/sk-ant-[A-Za-z0-9_-]*/g, "sk-ant-[redactado]")
+    .replace(/(?<![A-Za-z])[A-Za-z]:(?:\\{1,2}|\/(?!\/))[^\s"'`]*/g, "[ruta]")
+    .replace(/(?<![\w:/.-])\/(?:[\w.-]+\/)+[\w.-]*/g, "[ruta]")
+    .replace(/\s+/g, " ")
+    .replace(/"/g, "'")
+    .trim()
+  return saneado.length > MAX_MENSAJE_DIAGNOSTICO ? `${saneado.slice(0, MAX_MENSAJE_DIAGNOSTICO)}…` : saneado
+}
+
+// Identificadores (tipo, request_id): solo caracteres seguros.
+const identificador = (valor: unknown): string => (typeof valor === "string" && valor !== "" ? valor.replace(/[^\w.-]/g, "").slice(0, 100) : "-")
+
+function mensajeDelCuerpo(cuerpo: unknown): string | null {
+  if (typeof cuerpo !== "object" || cuerpo === null) return null
+  const error: unknown = Reflect.get(cuerpo, "error")
+  if (typeof error !== "object" || error === null) return null
+  const mensaje: unknown = Reflect.get(error, "message")
+  return typeof mensaje === "string" ? mensaje : null
+}
+
+// Línea de diagnóstico para un error HTTP del proveedor; null si no hubo respuesta HTTP (red, timeout).
+export function diagnosticoError(e: unknown): string | null {
+  if (!(e instanceof Anthropic.APIError) || typeof e.status !== "number") return null
+  const mensaje = sanearDiagnostico(mensajeDelCuerpo(e.error) ?? e.message)
+  return `[anthropic] status=${e.status} type=${identificador(e.type)} request_id=${identificador(e.requestID)} message="${mensaje}"`
+}
+
 export class AnthropicAdapter implements LlmAdapter {
   readonly proveedor = "anthropic"
   readonly modelo: string
@@ -112,6 +150,8 @@ export class AnthropicAdapter implements LlmAdapter {
       })
       return deRespuesta(respuesta)
     } catch (e) {
+      const diagnostico = diagnosticoError(e)
+      if (diagnostico !== null) console.error(diagnostico)
       throw traducirError(e)
     }
   }
